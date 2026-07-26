@@ -154,7 +154,6 @@ def crear_botones_avanzados(botones_config, grupo_id, user_id=None):
             ))
         
         elif tipo == 'share_contador':
-            # ✅ BOTÓN ESPECIAL SHARE 0/2
             user_id_share = user_id or "0"
             share_data = cargar_share()
             
@@ -193,25 +192,33 @@ async def start(update, context):
         await update.message.reply_text("❌ No tienes permiso.")
         return
     
+    # ✅ SI ES EN GRUPO: SOLO AVISAR Y ABRIR EN PV
     if update.message.chat.type in ['group', 'supergroup']:
         grupo_id = update.message.chat_id
+        
+        # Guardar el grupo si no existe
+        get_grupo_config(grupo_id)
+        
         await update.message.reply_text(
             "🤖 *Configuración del grupo*\n\n"
-            "Abre el chat privado con el bot para configurar este grupo.\n"
+            "La configuración se realiza en el chat privado con el bot.\n"
+            "📌 Abre @SharkBot_Manager (o el nombre de tu bot) en privado.\n\n"
             "Usa /start en privado para ver todos tus grupos.",
             parse_mode="Markdown"
         )
         
+        # Enviar mensaje al admin en PV
         await context.bot.send_message(
             chat_id=ID_ADMIN,
             text=f"📌 *Configurar Grupo*\n\n"
                  f"Grupo ID: `{grupo_id}`\n"
                  f"Nombre: {update.message.chat.title}\n\n"
-                 f"Usa los comandos en este chat para configurar.",
+                 f"Usa /start en privado para configurar este grupo.",
             parse_mode="Markdown"
         )
         return
     
+    # ✅ EN PV: Mostrar todos los grupos
     config = cargar_config()
     grupos = config.get('grupos', {})
     
@@ -308,7 +315,6 @@ async def menu_callback(update, context):
     if action == "share" and parts[1] == "click":
         user_id = int(parts[2])
         
-        # Solo el usuario que inició el mensaje puede usarlo
         if update.effective_user.id != user_id:
             await query.answer("❌ Este botón solo lo puede usar su dueño.", show_alert=True)
             return
@@ -324,15 +330,12 @@ async def menu_callback(update, context):
         
         progreso = share_data['progreso'][str(user_id)]
         
-        # Si ya completó, mostrar mensaje
         if progreso['completado']:
             await query.answer("✅ ¡Ya completaste el progreso!", show_alert=True)
             return
         
-        # Incrementar contador
         progreso['contador'] += 1
         
-        # Verificar si completó
         if progreso['contador'] >= progreso['maximo']:
             progreso['completado'] = True
             await query.answer("🎉 ¡FELICIDADES! Has completado 2/2", show_alert=True)
@@ -343,26 +346,19 @@ async def menu_callback(update, context):
         
         # ✅ EDITAR EL MENSAJE CON EL NUEVO PROGRESO
         try:
-            # Obtener el mensaje original
             message = query.message
-            
-            # Extraer el texto original
             texto_original = message.text or "📊 *SISTEMA DE INVITACIÓN*"
             
-            # Crear nuevo keyboard con el progreso actualizado
-            keyboard = []
-            fila = []
-            
-            # Buscar el botón SHARE en la configuración del grupo
             grupo_id = message.chat_id
             grupo_config = get_grupo_config(grupo_id)
             
+            keyboard = []
+            fila = []
+            
             for b in grupo_config.get('botones', []):
                 if b.get('tipo') == 'share_contador':
-                    # Crear el botón actualizado
                     if progreso['completado']:
                         texto_boton = "✅ ACCESO CONCEDIDO"
-                        # Botón de acceso
                         fila.append(InlineKeyboardButton(
                             texto_boton,
                             callback_data=f"share_acceso_{user_id}"
@@ -374,7 +370,6 @@ async def menu_callback(update, context):
                             callback_data=f"share_click_{user_id}"
                         ))
                 else:
-                    # Otros botones
                     if b.get('tipo') == 'url':
                         fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
                     elif b.get('tipo') == 'share':
@@ -395,13 +390,11 @@ async def menu_callback(update, context):
             if fila:
                 keyboard.append(fila)
             
-            # Si completó, agregar botón de acceso
             if progreso['completado']:
                 keyboard.append([InlineKeyboardButton("✅ ACCESO CONCEDIDO", callback_data=f"share_acceso_{user_id}")])
             
             reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
             
-            # Editar el mensaje
             await query.edit_message_text(
                 texto_original,
                 parse_mode="Markdown",
@@ -430,9 +423,6 @@ async def menu_callback(update, context):
             "🔗 [Haz clic aquí para unirte](https://t.me/+tu_enlace_aqui)",
             parse_mode="Markdown"
         )
-        
-        # Aquí puedes aprobar automáticamente al usuario
-        # await context.bot.approve_chat_join_request(chat_id=grupo_id, user_id=user_id)
         return
     
     # Manejar botones de ALERTA
@@ -1049,7 +1039,6 @@ async def preview_grupo(update, context, grupo_id):
     mensaje_prueba = mensaje_prueba.replace('{perfil}', '[Perfil](tg://user?id=123456789)')
     mensaje_prueba = mensaje_prueba.replace('{id}', '123456789')
     
-    # Pasar user_id para el botón SHARE 0/2
     user_id = update.effective_user.id
     reply_markup = crear_botones_avanzados(botones, grupo_id, user_id)
     
@@ -1120,6 +1109,7 @@ async def add_mensaje_grupo(update, context):
         })
         guardar_grupo_config(grupo_id, grupo_config)
         
+        # ✅ Programar mensaje en job_queue
         if context.application.job_queue:
             context.application.job_queue.run_repeating(
                 enviar_mensaje_programado_grupo,
@@ -1216,6 +1206,7 @@ async def list_mensajes_grupo(update, context):
     
     await update.message.reply_text(texto, parse_mode="Markdown")
 
+# ✅ CORREGIDO: Función mejorada para mensajes programados
 async def enviar_mensaje_programado_grupo(context):
     try:
         job = context.job
@@ -1235,7 +1226,7 @@ async def enviar_mensaje_programado_grupo(context):
             chat_members = await context.bot.get_chat_administrators(grupo_id)
             user_ids = [m.user.id for m in chat_members]
         except Exception as e:
-            logger.error(f"Error obteniendo miembros del grupo {grupo_id}: {str(e)}")
+            logger.error(f"Error obteniendo miembros: {str(e)}")
             return
         
         if not user_ids:
@@ -1398,7 +1389,6 @@ async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
         mensaje_personalizado = mensaje_personalizado.replace('{perfil}', f'[Perfil](tg://user?id={user.id})')
         mensaje_personalizado = mensaje_personalizado.replace('{id}', str(user.id))
         
-        # Pasar user_id para el botón SHARE 0/2
         reply_markup = crear_botones_avanzados(botones, grupo_id, user.id)
         
         if media and media.get('file_id'):
@@ -1577,7 +1567,6 @@ async def handle_config(update, context):
         await menu_principal(update, context, grupo_id=grupo_id)
         return
     
-    # ✅ BOTÓN SHARE CONTADOR
     elif estado == 'btn_share_contador':
         try:
             if 'botones' not in grupo_config:
@@ -1830,7 +1819,6 @@ def main():
     application.add_handler(CommandHandler("removemsg", remove_mensaje_grupo))
     application.add_handler(CommandHandler("listmsg", list_mensajes_grupo))
     
-    # Callbacks para el botón SHARE
     application.add_handler(CallbackQueryHandler(menu_callback, pattern="share_click_|share_acceso_"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|reingreso_|media_|reset_|auto_|t_|proteger_|borrar_|bt_|elim_|btn_|alert_|edit_|delete_|custom_"))
     
@@ -1842,7 +1830,7 @@ def main():
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
     
-    # Iniciar mensajes programados
+    # ✅ Iniciar mensajes programados al arrancar
     if application.job_queue:
         config = cargar_config()
         for gid, grupo_config in config.get('grupos', {}).items():
