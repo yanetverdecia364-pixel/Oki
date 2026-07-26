@@ -182,12 +182,10 @@ async def handle_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("❌ Error. Usa: Texto1|url1, Texto2|url2")
 
-# --- SOLICITUDES DE UNIÓN ---
+# --- SOLICITUDES DE UNIÓN (VERSIÓN SIMPLIFICADA) ---
 
-# ✅ CORREGIDO: Usamos ChatMemberHandler en lugar de filters.StatusUpdate
-from telegram.ext import ChatMemberHandler
-
-async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ✅ Esta función maneja TODOS los cambios de estado en el chat
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Verificar si es una solicitud de unión
         if not update.chat_join_request:
@@ -197,22 +195,22 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         user = join_request.from_user
         chat = join_request.chat
         
-        logger.info(f"Nueva solicitud de {user.first_name}")
+        logger.info(f"Nueva solicitud de {user.first_name} (@{user.username})")
         
-        # Aprobar automáticamente
+        # Aprobar automáticamente la solicitud
         await context.bot.approve_chat_join_request(chat_id=chat.id, user_id=user.id)
+        logger.info(f"✅ Solicitud aprobada para {user.first_name}")
         
-        # Enviar bienvenida
+        # Cargar configuración
         config = cargar_config()
-        mensaje = config.get('mensaje_bienvenida')
-        botones = config.get('botones', [])
+        mensaje = config.get('mensaje_bienvenida', config_default['mensaje_bienvenida'])
+        botones = config.get('botones', config_default['botones'])
         
-        if botones:
-            keyboard = [[InlineKeyboardButton(b['texto'], url=b['url'])] for b in botones]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-        else:
-            reply_markup = None
+        # Crear botones
+        keyboard = [[InlineKeyboardButton(b['texto'], url=b['url'])] for b in botones]
+        reply_markup = InlineKeyboardMarkup(keyboard)
         
+        # Enviar mensaje de bienvenida al usuario (en privado)
         await context.bot.send_message(
             chat_id=user.id,
             text=f"👋 ¡Hola {user.first_name}!\n\n" + mensaje,
@@ -223,7 +221,7 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"✅ Bienvenida enviada a {user.first_name}")
         
     except Exception as e:
-        logger.error(f"Error en handle_join_request: {str(e)}")
+        logger.error(f"Error en handle_chat_member_update: {str(e)}")
 
 # --- INICIO ---
 
@@ -231,7 +229,7 @@ def main():
     logger.info("🚀 Iniciando bot...")
     application = Application.builder().token(TOKEN).build()
     
-    # Comandos
+    # Comandos para el admin
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setwelcome", set_welcome))
     application.add_handler(CommandHandler("setbuttons", set_buttons))
@@ -239,16 +237,20 @@ def main():
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("cancelar", cancelar))
     
-    # Callbacks
+    # Callbacks del menú
     application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_"))
     
-    # Configuración
+    # Manejar mensajes de configuración
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
     
-    # ✅ CORREGIDO: Usamos ChatMemberHandler para solicitudes de unión
-    application.add_handler(ChatMemberHandler(handle_join_request, ChatMemberHandler.CHAT_JOIN_REQUEST))
+    # ✅ MANEJAR SOLICITUDES DE UNIÓN (forma más simple)
+    # Esto captura TODAS las actualizaciones de chat, incluyendo solicitudes de unión
+    application.add_handler(MessageHandler(filters.ALL, handle_chat_member_update))
     
     logger.info("✅ Bot iniciado correctamente!")
+    logger.info(f"👤 Admin ID: {ID_ADMIN}")
+    logger.info(f"🤖 Bot: @{context.bot.username if hasattr(context, 'bot') else 'desconocido'}")
+    
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
