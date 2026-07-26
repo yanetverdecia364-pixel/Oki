@@ -182,9 +182,8 @@ async def handle_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text("❌ Error. Usa: Texto1|url1, Texto2|url2")
 
-# --- SOLICITUDES DE UNIÓN (VERSIÓN SIMPLIFICADA) ---
+# --- SOLICITUDES DE UNIÓN ---
 
-# ✅ Esta función maneja TODOS los cambios de estado en el chat
 async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Verificar si es una solicitud de unión
@@ -243,13 +242,11 @@ def main():
     # Manejar mensajes de configuración
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
     
-    # ✅ MANEJAR SOLICITUDES DE UNIÓN (forma más simple)
-    # Esto captura TODAS las actualizaciones de chat, incluyendo solicitudes de unión
+    # Manejar solicitudes de unión
     application.add_handler(MessageHandler(filters.ALL, handle_chat_member_update))
     
     logger.info("✅ Bot iniciado correctamente!")
     logger.info(f"👤 Admin ID: {ID_ADMIN}")
-    logger.info(f"🤖 Bot: @{context.bot.username if hasattr(context, 'bot') else 'desconocido'}")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
