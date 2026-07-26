@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 ARCHIVO_CONFIG = "config.json"
 
-# Estados para ConversationHandler
 WAITING_FOR_RESPONSE = 1
 
 config_default = {
@@ -33,10 +32,13 @@ config_default = {
         {"texto": "📢 Canal Oficial", "url": "https://t.me/tucanal"},
         {"texto": "📋 Reglas", "url": "https://t.me/tusreglas"}
     ],
-    "media_bienvenida": None,
+    "media_bienvenida": None,  # {"tipo": "foto" o "video", "file_id": "..."}
     "mensajes_programados": [],
     "grupo_id": None,
-    "formato_texto": "markdown"
+    "formato_texto": "markdown",
+    "auto_aprobar": True,  # ✅ NUEVO: Activar/Desactivar auto-aprobación
+    "tiempo_aprobacion": 0,  # ✅ NUEVO: Tiempo en segundos antes de aprobar (0 = inmediato)
+    "solicitudes_pendientes": []  # ✅ NUEVO: Lista de solicitudes pendientes
 }
 
 def cargar_config():
@@ -54,10 +56,24 @@ def guardar_config(config):
 # ==================== MENÚ PRINCIPAL ====================
 
 async def menu_principal(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
+    config = cargar_config()
+    auto_aprobar = config.get('auto_aprobar', True)
+    tiempo = config.get('tiempo_aprobacion', 0)
+    
+    # Mostrar estado de auto-aprobación
+    estado_auto = "✅ Activada" if auto_aprobar else "❌ Desactivada"
+    if tiempo > 0:
+        minutos = tiempo / 60
+        estado_tiempo = f"⏰ Cada {minutos:.0f} min"
+    else:
+        estado_tiempo = "⚡ Inmediata"
+    
     keyboard = [
         [InlineKeyboardButton("📝 Mensaje de Bienvenida", callback_data="menu_welcome")],
         [InlineKeyboardButton("🖼️ Media de Bienvenida", callback_data="menu_media")],
         [InlineKeyboardButton("🔘 Configurar Botones", callback_data="menu_buttons")],
+        [InlineKeyboardButton("✅ Auto-Aprobación", callback_data="menu_auto")],
+        [InlineKeyboardButton("⏰ Tiempo de Aprobación", callback_data="menu_tiempo")],
         [InlineKeyboardButton("📨 Mensajes Programados", callback_data="menu_mensajes")],
         [InlineKeyboardButton("🎨 Formato de Texto", callback_data="menu_formato")],
         [InlineKeyboardButton("👁️ Vista Previa", callback_data="menu_preview")],
@@ -67,14 +83,16 @@ async def menu_principal(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     texto = (
-        "🤖 *Panel de Control - Bot Avanzado*\n\n"
-        "📌 *Funciones disponibles:*\n"
-        "• Mensajes de bienvenida con fotos/videos\n"
-        "• Botones personalizados\n"
-        "• Mensajes automáticos cada minutos\n"
-        "• Personalización con nombre del usuario\n"
-        "• Formato Markdown/HTML\n\n"
-        "Selecciona una opción:"
+        f"🤖 *Panel de Control - Bot Avanzado*\n\n"
+        f"📌 *Estado:*\n"
+        f"• Auto-Aprobación: {estado_auto}\n"
+        f"• Tiempo: {estado_tiempo}\n\n"
+        f"*Funciones:*\n"
+        f"• Mensajes de bienvenida con fotos/videos\n"
+        f"• Botones personalizados\n"
+        f"• Mensajes automáticos cada minutos\n"
+        f"• Envío al PV antes de aprobar\n\n"
+        f"Selecciona una opción:"
     )
     
     if edit and update.callback_query:
@@ -110,8 +128,86 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     config = cargar_config()
     
+    # ---------- AUTO-APROBACIÓN ----------
+    if data == "menu_auto":
+        auto = config.get('auto_aprobar', True)
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Activar" if not auto else "✅ Ya activada", callback_data="auto_activar")],
+            [InlineKeyboardButton("❌ Desactivar" if auto else "❌ Ya desactivada", callback_data="auto_desactivar")],
+            [InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        estado = "✅ Activada" if auto else "❌ Desactivada"
+        await query.edit_message_text(
+            f"✅ *Auto-Aprobación*\n\n"
+            f"*Estado actual:* {estado}\n\n"
+            f"Cuando está activada, el bot aprueba automáticamente las solicitudes.\n"
+            f"Cuando está desactivada, las solicitudes quedan pendientes.\n\n"
+            f"*Nota:* El mensaje de bienvenida siempre se envía al PV.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    elif data == "auto_activar":
+        config['auto_aprobar'] = True
+        guardar_config(config)
+        await query.edit_message_text("✅ Auto-aprobación ACTIVADA")
+        await menu_principal(update, context)
+    
+    elif data == "auto_desactivar":
+        config['auto_aprobar'] = False
+        guardar_config(config)
+        await query.edit_message_text("❌ Auto-aprobación DESACTIVADA")
+        await menu_principal(update, context)
+    
+    # ---------- TIEMPO DE APROBACIÓN ----------
+    elif data == "menu_tiempo":
+        tiempo = config.get('tiempo_aprobacion', 0)
+        
+        keyboard = [
+            [InlineKeyboardButton("⚡ Inmediata (0 seg)", callback_data="tiempo_0")],
+            [InlineKeyboardButton("⏰ 1 minuto", callback_data="tiempo_60")],
+            [InlineKeyboardButton("⏰ 2 minutos", callback_data="tiempo_120")],
+            [InlineKeyboardButton("⏰ 5 minutos", callback_data="tiempo_300")],
+            [InlineKeyboardButton("⏰ 10 minutos", callback_data="tiempo_600")],
+            [InlineKeyboardButton("⏰ 30 minutos", callback_data="tiempo_1800")],
+            [InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if tiempo > 0:
+            minutos = tiempo / 60
+            texto_tiempo = f"⏰ {minutos:.0f} minutos"
+        else:
+            texto_tiempo = "⚡ Inmediata"
+        
+        await query.edit_message_text(
+            f"⏰ *Tiempo de Aprobación*\n\n"
+            f"*Tiempo actual:* {texto_tiempo}\n\n"
+            f"Selecciona cuánto tiempo esperar antes de aprobar:\n"
+            f"• *Inmediata:* Aprobar al instante\n"
+            f"• *1-30 min:* Esperar antes de aprobar\n\n"
+            f"*Importante:* El mensaje de bienvenida se envía en el momento de la solicitud.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    elif data.startswith("tiempo_"):
+        segundos = int(data.split("_")[1])
+        config['tiempo_aprobacion'] = segundos
+        guardar_config(config)
+        
+        if segundos > 0:
+            minutos = segundos / 60
+            await query.edit_message_text(f"✅ Tiempo configurado: {minutos:.0f} minutos")
+        else:
+            await query.edit_message_text("✅ Tiempo configurado: Inmediata")
+        await menu_principal(update, context)
+    
     # ---------- MENSAJE DE BIENVENIDA ----------
-    if data == "menu_welcome":
+    elif data == "menu_welcome":
         keyboard = [
             [InlineKeyboardButton("✏️ Editar Mensaje", callback_data="welcome_edit")],
             [InlineKeyboardButton("📝 Ver Mensaje Actual", callback_data="welcome_view")],
@@ -336,9 +432,16 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mensajes = config.get('mensajes_programados', [])
         media = config.get('media_bienvenida')
         formato = config.get('formato_texto', 'markdown')
+        auto_aprobar = config.get('auto_aprobar', True)
+        tiempo = config.get('tiempo_aprobacion', 0)
         
         texto = "ℹ️ *Estado del Bot*\n\n"
         texto += f"✅ Bot activo\n"
+        texto += f"✅ Auto-Aprobación: {'Activada' if auto_aprobar else 'Desactivada'}\n"
+        if tiempo > 0:
+            texto += f"⏰ Tiempo: {tiempo/60:.0f} minutos\n"
+        else:
+            texto += f"⚡ Tiempo: Inmediata\n"
         texto += f"📝 Mensaje: {len(config.get('mensaje_bienvenida', ''))} caracteres\n"
         texto += f"🖼️ Media: {'✅' if media else '❌'}\n"
         texto += f"🔘 Botones: {len(botones)}\n"
@@ -622,7 +725,6 @@ async def enviar_mensaje_programado(context: ContextTypes.DEFAULT_TYPE):
             logger.warning("No hay grupo configurado")
             return
         
-        # Intentar obtener usuarios
         try:
             chat_members = await context.bot.get_chat_administrators(grupo_id)
             user_ids = [member.user.id for member in chat_members]
@@ -666,7 +768,7 @@ async def enviar_mensaje_programado(context: ContextTypes.DEFAULT_TYPE):
                             parse_mode="Markdown"
                         )
                     
-                    await asyncio.sleep(1)  # Evitar rate limiting
+                    await asyncio.sleep(1)
                     
                 except Exception as e:
                     logger.error(f"Error enviando a {user_id}: {str(e)}")
@@ -675,7 +777,6 @@ async def enviar_mensaje_programado(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error en enviar_mensaje_programado: {str(e)}")
 
 async def programar_mensajes(application: Application):
-    """Programa todos los mensajes automáticos al iniciar el bot"""
     config = cargar_config()
     
     for msg_config in config.get('mensajes_programados', []):
@@ -698,7 +799,6 @@ async def programar_mensajes(application: Application):
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja las solicitudes de unión a grupos"""
     try:
-        # Verificar si es una solicitud de unión
         if not update.chat_join_request:
             return
             
@@ -708,13 +808,6 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         logger.info(f"🔵 Nueva solicitud de {user.first_name} (@{user.username})")
         
-        # ✅ APROBAR automáticamente la solicitud
-        try:
-            await context.bot.approve_chat_join_request(chat_id=chat.id, user_id=user.id)
-            logger.info(f"✅ Solicitud aprobada para {user.first_name}")
-        except Exception as e:
-            logger.error(f"Error al aprobar: {str(e)}")
-        
         # Guardar ID del grupo
         config = cargar_config()
         if not config.get('grupo_id'):
@@ -722,10 +815,55 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
             guardar_config(config)
             logger.info(f"📌 Grupo guardado: {chat.title} (ID: {chat.id})")
         
-        # Esperar un momento antes de enviar mensaje
-        await asyncio.sleep(1)
+        # ✅ ENVIAR MENSAJE DE BIENVENIDA AL PV ANTES DE APROBAR
+        await enviar_bienvenida_pv(update, context, user, chat)
         
-        # Cargar configuración
+        # Verificar auto-aprobación
+        auto_aprobar = config.get('auto_aprobar', True)
+        tiempo_aprobacion = config.get('tiempo_aprobacion', 0)
+        
+        if auto_aprobar:
+            if tiempo_aprobacion > 0:
+                # ✅ Aprobar después del tiempo configurado
+                logger.info(f"⏰ Esperando {tiempo_aprobacion} segundos para aprobar a {user.first_name}")
+                
+                # Programar aprobación
+                context.application.job_queue.run_once(
+                    aprobar_solicitud,
+                    tiempo_aprobacion,
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    name=f"aprobar_{user.id}"
+                )
+                
+                # Enviar mensaje al admin
+                await context.bot.send_message(
+                    chat_id=ID_ADMIN,
+                    text=f"⏰ Solicitud de {user.first_name} será aprobada en {tiempo_aprobacion/60:.0f} minutos"
+                )
+            else:
+                # ✅ Aprobación inmediata
+                await aprobar_solicitud(context, chat_id=chat.id, user_id=user.id)
+        else:
+            # ❌ No aprobar automáticamente
+            logger.info(f"❌ Auto-aprobación desactivada para {user.first_name}")
+            await context.bot.send_message(
+                chat_id=ID_ADMIN,
+                text=f"❌ Nueva solicitud de {user.first_name} (@{user.username})\n"
+                     f"Pendiente de aprobación manual."
+            )
+        
+        return WAITING_FOR_RESPONSE
+        
+    except Exception as e:
+        logger.error(f"Error en handle_join_request: {str(e)}")
+        return None
+
+async def enviar_bienvenida_pv(update: Update, context: ContextTypes.DEFAULT_TYPE, user, chat):
+    """Envía el mensaje de bienvenida al PV del usuario"""
+    try:
+        config = cargar_config()
+        
         mensaje = config.get('mensaje_bienvenida', config_default['mensaje_bienvenida'])
         botones = config.get('botones', config_default['botones'])
         media = config.get('media_bienvenida')
@@ -744,53 +882,51 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
-        # ✅ ENVIAR mensaje de bienvenida
-        try:
-            if media and media.get('file_id'):
-                if media.get('tipo') == 'foto':
-                    await context.bot.send_photo(
-                        chat_id=user.id,
-                        photo=media.get('file_id'),
-                        caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                        parse_mode=formato.upper(),
-                        reply_markup=reply_markup
-                    )
-                elif media.get('tipo') == 'video':
-                    await context.bot.send_video(
-                        chat_id=user.id,
-                        video=media.get('file_id'),
-                        caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                        parse_mode=formato.upper(),
-                        reply_markup=reply_markup
-                    )
-            else:
-                await context.bot.send_message(
+        # ✅ ENVIAR mensaje de bienvenida al PV
+        if media and media.get('file_id'):
+            if media.get('tipo') == 'foto':
+                await context.bot.send_photo(
                     chat_id=user.id,
-                    text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
+                    photo=media.get('file_id'),
+                    caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
                     parse_mode=formato.upper(),
                     reply_markup=reply_markup
                 )
-            
-            logger.info(f"✅ Bienvenida enviada a {user.first_name}")
-            
-        except Exception as e:
-            logger.error(f"Error al enviar bienvenida a {user.first_name}: {str(e)}")
-            # Si falla con media, intentar sin media
-            try:
-                await context.bot.send_message(
+            elif media.get('tipo') == 'video':
+                await context.bot.send_video(
                     chat_id=user.id,
-                    text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                    parse_mode=formato.upper()
+                    video=media.get('file_id'),
+                    caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
+                    parse_mode=formato.upper(),
+                    reply_markup=reply_markup
                 )
-            except:
-                pass
+        else:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
+                parse_mode=formato.upper(),
+                reply_markup=reply_markup
+            )
         
-        # Retornar estado para ConversationHandler
-        return WAITING_FOR_RESPONSE
+        logger.info(f"✅ Bienvenida enviada al PV de {user.first_name}")
         
     except Exception as e:
-        logger.error(f"Error en handle_join_request: {str(e)}")
-        return None
+        logger.error(f"Error enviando bienvenida a {user.first_name}: {str(e)}")
+
+async def aprobar_solicitud(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
+    """Aprueba la solicitud de unión"""
+    try:
+        await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+        logger.info(f"✅ Solicitud aprobada para usuario {user_id}")
+        
+        # Notificar al admin
+        await context.bot.send_message(
+            chat_id=ID_ADMIN,
+            text=f"✅ Usuario {user_id} aprobado automáticamente."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error aprobando solicitud: {str(e)}")
 
 async def handle_user_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Maneja la respuesta del usuario después de unirse"""
@@ -800,7 +936,6 @@ async def handle_user_response(update: Update, context: ContextTypes.DEFAULT_TYP
         
         logger.info(f"💬 Respuesta de {user_name}: {update.message.text[:50]}...")
         
-        # Aquí puedes procesar la respuesta del usuario
         await update.message.reply_text(
             f"✅ Gracias por tu respuesta, {user_name}!",
             parse_mode="Markdown"
@@ -931,7 +1066,6 @@ async def handle_media_programada(update: Update, context: ContextTypes.DEFAULT_
 def main():
     logger.info("🚀 Iniciando bot avanzado...")
     
-    # Crear aplicación
     application = Application.builder().token(TOKEN).build()
     
     # ---------- COMANDOS DEL ADMIN ----------
@@ -952,14 +1086,13 @@ def main():
     application.add_handler(CommandHandler("listmsg", list_mensajes))
     
     # ---------- CALLBACKS DEL MENÚ ----------
-    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|media_|formato_|reset_"))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|media_|formato_|reset_|auto_|tiempo_"))
     
     # ---------- CONFIGURACIÓN ----------
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media_programada))
     
-    # ---------- SOLICITUDES DE UNIÓN (CORREGIDO) ----------
-    # Usar ConversationHandler para manejar solicitudes de unión
+    # ---------- SOLICITUDES DE UNIÓN ----------
     conv_handler = ConversationHandler(
         entry_points=[ChatJoinRequestHandler(handle_join_request)],
         states={
@@ -971,14 +1104,13 @@ def main():
             ]
         },
         fallbacks=[],
-        per_chat=False,  # 🔑 Rastrear por usuario, no por chat
+        per_chat=False,
         name="join_request_conversation"
     )
     application.add_handler(conv_handler)
     
     # ---------- INICIAR MENSAJES PROGRAMADOS ----------
     if application.job_queue:
-        # Programar mensajes al inicio
         config = cargar_config()
         for msg_config in config.get('mensajes_programados', []):
             intervalo = msg_config.get('intervalo', 3600)
@@ -995,7 +1127,7 @@ def main():
                 minutos = intervalo / 60
                 logger.info(f"📨 Mensaje programado cada {minutos:.0f} minutos")
     else:
-        logger.warning("⚠️ JobQueue no disponible. Asegúrate de tener 'python-telegram-bot[job-queue]' instalado")
+        logger.warning("⚠️ JobQueue no disponible")
     
     logger.info("✅ Bot avanzado iniciado correctamente!")
     logger.info(f"👤 Admin ID: {ID_ADMIN}")
