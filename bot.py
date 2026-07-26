@@ -3,7 +3,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -19,26 +19,34 @@ from telegram.ext import (
 TOKEN = "8960529925:AAGcOZHg8O-oVH_pRJ6CGwLvaRuXpN54lcI"
 ID_ADMIN = 5353490913
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 ARCHIVO_CONFIG = "config.json"
+ARCHIVO_REGISTRO = "registro.json"
 
+# Estados
 WAITING_FOR_RESPONSE = 1
+WAITING_MEDIA = 2
 
 config_default = {
     "mensaje_bienvenida": "¡Bienvenido al grupo! 🎉\n\nTe damos la bienvenida a nuestra comunidad.",
+    "mensaje_reingreso": "¡Bienvenido de nuevo {nombre}! 🎉\n\nNos alegra verte otra vez.",
     "botones": [
-        {"texto": "📢 Canal Oficial", "url": "https://t.me/tucanal"},
-        {"texto": "📋 Reglas", "url": "https://t.me/tusreglas"}
+        {"texto": "📢 Canal Oficial", "url": "https://t.me/tucanal", "color": "primary"},
+        {"texto": "📋 Reglas", "url": "https://t.me/tusreglas", "color": "secondary"}
     ],
-    "media_bienvenida": None,  # {"tipo": "foto" o "video", "file_id": "..."}
+    "media_bienvenida": None,
+    "media_reingreso": None,
     "mensajes_programados": [],
     "grupo_id": None,
     "formato_texto": "markdown",
-    "auto_aprobar": True,  # ✅ NUEVO: Activar/Desactivar auto-aprobación
-    "tiempo_aprobacion": 0,  # ✅ NUEVO: Tiempo en segundos antes de aprobar (0 = inmediato)
-    "solicitudes_pendientes": []  # ✅ NUEVO: Lista de solicitudes pendientes
+    "auto_aprobar": True,
+    "tiempo_aprobacion": 0,
+    "borrar_mensajes_pv": True,
+    "proteger_mensajes": True,
+    "tiempo_borrado_pv": 60,
+    "usuarios_registrados": {}
 }
 
 def cargar_config():
@@ -53,46 +61,63 @@ def guardar_config(config):
     with open(ARCHIVO_CONFIG, "w") as f:
         json.dump(config, f, indent=4)
 
-# ==================== MENÚ PRINCIPAL ====================
+def cargar_registro():
+    try:
+        with open(ARCHIVO_REGISTRO, "r") as f:
+            return json.load(f)
+    except:
+        return {"usuarios": {}}
+
+def guardar_registro(registro):
+    with open(ARCHIVO_REGISTRO, "w") as f:
+        json.dump(registro, f, indent=4)
+
+# ==================== MENÚ PRINCIPAL ESTÉTICO ====================
 
 async def menu_principal(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
     config = cargar_config()
     auto_aprobar = config.get('auto_aprobar', True)
     tiempo = config.get('tiempo_aprobacion', 0)
+    proteger = config.get('proteger_mensajes', True)
     
-    # Mostrar estado de auto-aprobación
     estado_auto = "✅ Activada" if auto_aprobar else "❌ Desactivada"
+    estado_proteger = "🔒 Activado" if proteger else "🔓 Desactivado"
     if tiempo > 0:
         minutos = tiempo / 60
-        estado_tiempo = f"⏰ Cada {minutos:.0f} min"
+        estado_tiempo = f"⏰ {minutos:.0f} min"
     else:
         estado_tiempo = "⚡ Inmediata"
     
     keyboard = [
-        [InlineKeyboardButton("📝 Mensaje de Bienvenida", callback_data="menu_welcome")],
-        [InlineKeyboardButton("🖼️ Media de Bienvenida", callback_data="menu_media")],
-        [InlineKeyboardButton("🔘 Configurar Botones", callback_data="menu_buttons")],
-        [InlineKeyboardButton("✅ Auto-Aprobación", callback_data="menu_auto")],
-        [InlineKeyboardButton("⏰ Tiempo de Aprobación", callback_data="menu_tiempo")],
-        [InlineKeyboardButton("📨 Mensajes Programados", callback_data="menu_mensajes")],
-        [InlineKeyboardButton("🎨 Formato de Texto", callback_data="menu_formato")],
-        [InlineKeyboardButton("👁️ Vista Previa", callback_data="menu_preview")],
-        [InlineKeyboardButton("🔄 Resetear Todo", callback_data="menu_reset")],
-        [InlineKeyboardButton("ℹ️ Estado del Bot", callback_data="menu_status")]
+        [InlineKeyboardButton("📝 ✨ Mensaje de Bienvenida", callback_data="menu_welcome")],
+        [InlineKeyboardButton("🖼️ 🎬 Media de Bienvenida", callback_data="menu_media")],
+        [InlineKeyboardButton("🔘 🎨 Botones Colores", callback_data="menu_buttons")],
+        [InlineKeyboardButton("✅ 🔄 Auto-Aprobación", callback_data="menu_auto")],
+        [InlineKeyboardButton("⏰ ⏳ Tiempo de Aprobación", callback_data="menu_tiempo")],
+        [InlineKeyboardButton("📨 🔁 Mensajes Programados", callback_data="menu_mensajes")],
+        [InlineKeyboardButton("🎨 📝 Formato de Texto", callback_data="menu_formato")],
+        [InlineKeyboardButton("🔒 🛡️ Protección PV", callback_data="menu_proteccion")],
+        [InlineKeyboardButton("👁️ 🖼️ Vista Previa", callback_data="menu_preview")],
+        [InlineKeyboardButton("🔄 ❌ Resetear Todo", callback_data="menu_reset")],
+        [InlineKeyboardButton("ℹ️ 📊 Estado del Bot", callback_data="menu_status")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     texto = (
-        f"🤖 *Panel de Control - Bot Avanzado*\n\n"
-        f"📌 *Estado:*\n"
+        f"🤖 *✨ BOT AVANZADO PRO ✨*\n"
+        f"{'═' * 30}\n\n"
+        f"📌 *ESTADO:*\n"
         f"• Auto-Aprobación: {estado_auto}\n"
-        f"• Tiempo: {estado_tiempo}\n\n"
-        f"*Funciones:*\n"
-        f"• Mensajes de bienvenida con fotos/videos\n"
-        f"• Botones personalizados\n"
-        f"• Mensajes automáticos cada minutos\n"
-        f"• Envío al PV antes de aprobar\n\n"
-        f"Selecciona una opción:"
+        f"• Tiempo: {estado_tiempo}\n"
+        f"• Protección PV: {estado_proteger}\n\n"
+        f"📋 *FUNCIONES:*\n"
+        f"✅ Mensajes con Fotos/Videos\n"
+        f"✅ Botones con Colores\n"
+        f"✅ Mensajes Programados\n"
+        f"✅ Borrado Automático PV\n"
+        f"✅ Protección de Mensajes\n"
+        f"✅ Mensaje de Reingreso\n\n"
+        f"🔽 *Selecciona una opción:*"
     )
     
     if edit and update.callback_query:
@@ -128,24 +153,99 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     config = cargar_config()
     
+    # ---------- PROTECCIÓN PV ----------
+    if data == "menu_proteccion":
+        proteger = config.get('proteger_mensajes', True)
+        borrar = config.get('borrar_mensajes_pv', True)
+        tiempo_borrado = config.get('tiempo_borrado_pv', 60)
+        
+        keyboard = [
+            [InlineKeyboardButton("🔒 Activar Protección" if not proteger else "🔒 Ya Activada", callback_data="proteger_activar")],
+            [InlineKeyboardButton("🔓 Desactivar Protección" if proteger else "🔓 Ya Desactivada", callback_data="proteger_desactivar")],
+            [InlineKeyboardButton("🗑️ Borrar Mensajes PV" if borrar else "🗑️ No Borrar", callback_data="borrar_toggle")],
+            [InlineKeyboardButton(f"⏰ Tiempo: {tiempo_borrado}s", callback_data="borrar_tiempo")],
+            [InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        estado = "🔒 Activada" if proteger else "🔓 Desactivada"
+        estado_borrar = "✅ Activo" if borrar else "❌ Inactivo"
+        
+        await query.edit_message_text(
+            f"🛡️ *PROTECCIÓN Y PRIVACIDAD*\n\n"
+            f"*Protección de mensajes:* {estado}\n"
+            f"  ↳ Impide reenviar mensajes del bot\n\n"
+            f"*Borrado automático PV:* {estado_borrar}\n"
+            f"  ↳ Tiempo: {tiempo_borrado} segundos\n\n"
+            f"*Funciones:*\n"
+            f"• Los mensajes del bot no se pueden reenviar\n"
+            f"• Los mensajes en PV se borran automáticamente\n"
+            f"• Los mensajes del usuario también se borran",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    elif data == "proteger_activar":
+        config['proteger_mensajes'] = True
+        guardar_config(config)
+        await query.edit_message_text("✅ Protección de mensajes ACTIVADA")
+        await menu_principal(update, context)
+    
+    elif data == "proteger_desactivar":
+        config['proteger_mensajes'] = False
+        guardar_config(config)
+        await query.edit_message_text("❌ Protección de mensajes DESACTIVADA")
+        await menu_principal(update, context)
+    
+    elif data == "borrar_toggle":
+        config['borrar_mensajes_pv'] = not config.get('borrar_mensajes_pv', True)
+        guardar_config(config)
+        estado = "ACTIVADO" if config['borrar_mensajes_pv'] else "DESACTIVADO"
+        await query.edit_message_text(f"✅ Borrado automático {estADO}")
+        await menu_principal(update, context)
+    
+    elif data == "borrar_tiempo":
+        keyboard = [
+            [InlineKeyboardButton("30 segundos", callback_data="borrar_30")],
+            [InlineKeyboardButton("60 segundos", callback_data="borrar_60")],
+            [InlineKeyboardButton("120 segundos", callback_data="borrar_120")],
+            [InlineKeyboardButton("300 segundos (5 min)", callback_data="borrar_300")],
+            [InlineKeyboardButton("🔙 Atrás", callback_data="menu_proteccion")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "⏰ *Selecciona el tiempo de borrado:*\n\n"
+            "Los mensajes en PV se borrarán después de este tiempo.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    
+    elif data.startswith("borrar_"):
+        segundos = int(data.split("_")[1])
+        config['tiempo_borrado_pv'] = segundos
+        guardar_config(config)
+        await query.edit_message_text(f"✅ Tiempo configurado: {segundos} segundos")
+        await menu_principal(update, context)
+    
     # ---------- AUTO-APROBACIÓN ----------
-    if data == "menu_auto":
+    elif data == "menu_auto":
         auto = config.get('auto_aprobar', True)
         
         keyboard = [
-            [InlineKeyboardButton("✅ Activar" if not auto else "✅ Ya activada", callback_data="auto_activar")],
-            [InlineKeyboardButton("❌ Desactivar" if auto else "❌ Ya desactivada", callback_data="auto_desactivar")],
+            [InlineKeyboardButton("✅ Activar" if not auto else "✅ Ya Activada", callback_data="auto_activar")],
+            [InlineKeyboardButton("❌ Desactivar" if auto else "❌ Ya Desactivada", callback_data="auto_desactivar")],
             [InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         estado = "✅ Activada" if auto else "❌ Desactivada"
         await query.edit_message_text(
-            f"✅ *Auto-Aprobación*\n\n"
-            f"*Estado actual:* {estado}\n\n"
-            f"Cuando está activada, el bot aprueba automáticamente las solicitudes.\n"
-            f"Cuando está desactivada, las solicitudes quedan pendientes.\n\n"
-            f"*Nota:* El mensaje de bienvenida siempre se envía al PV.",
+            f"✅ *AUTO-APROBACIÓN*\n\n"
+            f"*Estado:* {estado}\n\n"
+            f"• *Activada:* Aprueba automáticamente\n"
+            f"• *Desactivada:* Queda pendiente\n\n"
+            f"*El mensaje de bienvenida SIEMPRE se envía al PV*",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
@@ -164,10 +264,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ---------- TIEMPO DE APROBACIÓN ----------
     elif data == "menu_tiempo":
-        tiempo = config.get('tiempo_aprobacion', 0)
-        
         keyboard = [
-            [InlineKeyboardButton("⚡ Inmediata (0 seg)", callback_data="tiempo_0")],
+            [InlineKeyboardButton("⚡ Inmediata (0s)", callback_data="tiempo_0")],
+            [InlineKeyboardButton("⏰ 30 segundos", callback_data="tiempo_30")],
             [InlineKeyboardButton("⏰ 1 minuto", callback_data="tiempo_60")],
             [InlineKeyboardButton("⏰ 2 minutos", callback_data="tiempo_120")],
             [InlineKeyboardButton("⏰ 5 minutos", callback_data="tiempo_300")],
@@ -177,19 +276,21 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
+        tiempo = config.get('tiempo_aprobacion', 0)
         if tiempo > 0:
-            minutos = tiempo / 60
-            texto_tiempo = f"⏰ {minutos:.0f} minutos"
+            if tiempo >= 60:
+                minutos = tiempo / 60
+                texto_tiempo = f"⏰ {minutos:.0f} minutos"
+            else:
+                texto_tiempo = f"⏰ {tiempo} segundos"
         else:
             texto_tiempo = "⚡ Inmediata"
         
         await query.edit_message_text(
-            f"⏰ *Tiempo de Aprobación*\n\n"
-            f"*Tiempo actual:* {texto_tiempo}\n\n"
-            f"Selecciona cuánto tiempo esperar antes de aprobar:\n"
-            f"• *Inmediata:* Aprobar al instante\n"
-            f"• *1-30 min:* Esperar antes de aprobar\n\n"
-            f"*Importante:* El mensaje de bienvenida se envía en el momento de la solicitud.",
+            f"⏰ *TIEMPO DE APROBACIÓN*\n\n"
+            f"*Actual:* {texto_tiempo}\n\n"
+            f"Selecciona el tiempo de espera antes de aprobar.\n"
+            f"*El mensaje de bienvenida se envía al momento.*",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
@@ -200,122 +301,169 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guardar_config(config)
         
         if segundos > 0:
-            minutos = segundos / 60
-            await query.edit_message_text(f"✅ Tiempo configurado: {minutos:.0f} minutos")
+            if segundos >= 60:
+                minutos = segundos / 60
+                await query.edit_message_text(f"✅ Tiempo: {minutos:.0f} minutos")
+            else:
+                await query.edit_message_text(f"✅ Tiempo: {segundos} segundos")
         else:
-            await query.edit_message_text("✅ Tiempo configurado: Inmediata")
+            await query.edit_message_text("✅ Tiempo: Inmediata")
         await menu_principal(update, context)
     
     # ---------- MENSAJE DE BIENVENIDA ----------
     elif data == "menu_welcome":
         keyboard = [
-            [InlineKeyboardButton("✏️ Editar Mensaje", callback_data="welcome_edit")],
-            [InlineKeyboardButton("📝 Ver Mensaje Actual", callback_data="welcome_view")],
+            [InlineKeyboardButton("✏️ Editar Bienvenida", callback_data="welcome_edit")],
+            [InlineKeyboardButton("✏️ Editar Reingreso", callback_data="welcome_reingreso")],
+            [InlineKeyboardButton("📝 Ver Mensaje", callback_data="welcome_view")],
             [InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        mensaje_actual = config.get('mensaje_bienvenida', 'No configurado')
+        mensaje = config.get('mensaje_bienvenida', 'No configurado')
+        reingreso = config.get('mensaje_reingreso', 'No configurado')
+        
         await query.edit_message_text(
-            f"📝 *Mensaje de Bienvenida*\n\n"
-            f"*Mensaje actual:*\n"
-            f"`{mensaje_actual[:100]}...`\n\n"
-            f"Usa `{{nombre}}` para mostrar el nombre del usuario.\n"
-            f"Ejemplo: `¡Bienvenido {{nombre}}! 🎉`",
+            f"📝 *MENSAJES DE BIENVENIDA*\n\n"
+            f"*Bienvenida:*\n`{mensaje[:60]}...`\n\n"
+            f"*Reingreso:*\n`{reingreso[:60]}...`\n\n"
+            f"Usa `{{nombre}}` para el nombre del usuario.\n"
+            f"Usa `{{membresia}}` para días en el grupo.",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
     
     elif data == "welcome_edit":
         await query.edit_message_text(
-            "✏️ Envía el nuevo mensaje de bienvenida.\n\n"
-            "Puedes usar:\n"
-            "• `*negrita*`\n"
-            "• `_cursiva_`\n"
-            "• `[texto](url)` para enlaces\n"
-            "• `{nombre}` para el nombre del usuario\n\n"
+            "✏️ *EDITAR BIENVENIDA*\n\n"
+            "Envía el nuevo mensaje de bienvenida.\n\n"
+            "Variables disponibles:\n"
+            "• `{nombre}` - Nombre del usuario\n"
+            "• `{membresia}` - Días en el grupo\n\n"
+            "Formato:\n"
+            "• `*negrita*` - Negrita\n"
+            "• `_cursiva_` - Cursiva\n"
+            "• `[texto](url)` - Enlace\n\n"
             "Ejemplo:\n"
-            "`¡Bienvenido {nombre}! 🎉\n\nVisita nuestro [canal](https://t.me/mi_canal)`\n\n"
-            "Para cancelar, escribe /cancelar",
+            "`¡Bienvenido {nombre}! 🎉`\n\n"
+            "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
         context.user_data['esperando'] = 'welcome'
     
+    elif data == "welcome_reingreso":
+        await query.edit_message_text(
+            "✏️ *EDITAR MENSAJE DE REINGRESO*\n\n"
+            "Envía el mensaje para usuarios que vuelven a unirse.\n\n"
+            "Variables disponibles:\n"
+            "• `{nombre}` - Nombre del usuario\n"
+            "• `{membresia}` - Días en el grupo\n\n"
+            "Ejemplo:\n"
+            "`¡Bienvenido de nuevo {nombre}! 🎉`\n\n"
+            "Para cancelar: /cancelar",
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando'] = 'reingreso'
+    
     elif data == "welcome_view":
         mensaje = config.get('mensaje_bienvenida', 'No configurado')
+        reingreso = config.get('mensaje_reingreso', 'No configurado')
         keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data="menu_welcome")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"📝 *Mensaje actual:*\n\n{mensaje}",
+            f"📝 *MENSAJES COMPLETOS*\n\n"
+            f"*Bienvenida:*\n{mensaje}\n\n"
+            f"*Reingreso:*\n{reingreso}",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
     
-    # ---------- MEDIA DE BIENVENIDA ----------
+    # ---------- MEDIA ----------
     elif data == "menu_media":
         media = config.get('media_bienvenida')
+        media_reingreso = config.get('media_reingreso')
         
         keyboard = [
-            [InlineKeyboardButton("📤 Enviar Foto/Video", callback_data="media_send")],
-            [InlineKeyboardButton("🗑️ Eliminar Media", callback_data="media_delete")],
+            [InlineKeyboardButton("📤 Bienvenida", callback_data="media_send")],
+            [InlineKeyboardButton("📤 Reingreso", callback_data="media_send_reingreso")],
+            [InlineKeyboardButton("🗑️ Eliminar Bienvenida", callback_data="media_delete")],
+            [InlineKeyboardButton("🗑️ Eliminar Reingreso", callback_data="media_delete_reingreso")],
             [InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        estado = "✅ Configurada" if media else "❌ No configurada"
-        tipo = f" ({media.get('tipo')})" if media else ""
+        estado1 = "✅" if media else "❌"
+        estado2 = "✅" if media_reingreso else "❌"
         
         await query.edit_message_text(
-            f"🖼️ *Media de Bienvenida*\n\n"
-            f"*Estado:* {estado}{tipo}\n\n"
-            f"Envía una foto o video para usarlo en el mensaje de bienvenida.",
+            f"🖼️ *MEDIA DE BIENVENIDA*\n\n"
+            f"*Bienvenida:* {estado1}\n"
+            f"*Reingreso:* {estado2}\n\n"
+            f"Envía una foto o video para cada mensaje.",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
     
     elif data == "media_send":
         await query.edit_message_text(
-            "📤 Envía la **foto** o **video** que quieras usar.\n\n"
-            "El bot lo guardará y lo enviará junto al mensaje de bienvenida.\n\n"
-            "Para cancelar, escribe /cancelar",
+            "📤 Envía la foto/video para la **BIENVENIDA**\n\n"
+            "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
         context.user_data['esperando'] = 'media'
+        context.user_data['tipo_media'] = 'bienvenida'
+    
+    elif data == "media_send_reingreso":
+        await query.edit_message_text(
+            "📤 Envía la foto/video para el **REINGRESO**\n\n"
+            "Para cancelar: /cancelar",
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando'] = 'media'
+        context.user_data['tipo_media'] = 'reingreso'
     
     elif data == "media_delete":
         config['media_bienvenida'] = None
         guardar_config(config)
-        
-        keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data="menu_media")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "✅ Media eliminada correctamente.",
-            reply_markup=reply_markup
-        )
+        await query.edit_message_text("✅ Media de bienvenida eliminada")
+        await menu_principal(update, context)
     
-    # ---------- BOTONES ----------
+    elif data == "media_delete_reingreso":
+        config['media_reingreso'] = None
+        guardar_config(config)
+        await query.edit_message_text("✅ Media de reingreso eliminada")
+        await menu_principal(update, context)
+    
+    # ---------- BOTONES CON COLORES ----------
     elif data == "menu_buttons":
         botones = config.get('botones', [])
         
-        texto = "🔘 *Configurar Botones*\n\n"
+        texto = "🎨 *BOTONES CON COLORES*\n\n"
         if botones:
             texto += "*Botones actuales:*\n"
             for i, btn in enumerate(botones, 1):
-                if btn.get('url'):
-                    texto += f"{i}. {btn['texto']} → {btn['url']}\n"
-                else:
-                    texto += f"{i}. 📤 {btn['texto']}\n"
+                color = btn.get('color', 'primary')
+                emoji = {
+                    'primary': '🔵',
+                    'secondary': '⚪',
+                    'success': '🟢',
+                    'danger': '🔴',
+                    'warning': '🟡'
+                }.get(color, '🔵')
+                texto += f"{i}. {emoji} {btn['texto']}\n"
         else:
             texto += "No hay botones configurados.\n"
         
         texto += "\n*Comandos:*\n"
-        texto += "• /setbuttons - Configurar botones\n"
-        texto += "• /resetbuttons - Eliminar todos los botones\n\n"
+        texto += "/setbuttons - Configurar botones\n"
+        texto += "/resetbuttons - Eliminar todos\n\n"
         texto += "*Formato:*\n"
-        texto += "`Texto|url, Texto2|url2`\n"
-        texto += "• `Compartir grupo` - Botón para compartir"
+        texto += "`Texto|url|color`\n"
+        texto += "• Colores: primary, secondary, success, danger, warning\n"
+        texto += "• `Compartir grupo` - Botón compartir\n\n"
+        texto += "*Ejemplo:*\n"
+        texto += "`📢 Canal|https://t.me/canal|primary, 📤 Compartir grupo`"
         
         keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -326,38 +474,37 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_mensajes":
         mensajes = config.get('mensajes_programados', [])
         
-        texto = "📨 *Mensajes Programados*\n\n"
+        texto = "📨 *MENSAJES PROGRAMADOS*\n\n"
         if mensajes:
-            texto += "*Mensajes activos:*\n"
+            texto += "*Activos:*\n"
             for i, msg in enumerate(mensajes, 1):
                 segundos = msg.get('intervalo', 3600)
                 if segundos >= 3600:
                     horas = segundos / 3600
-                    tiempo = f"{horas:.1f} horas"
+                    tiempo = f"{horas:.1f}h"
                 else:
                     minutos = segundos / 60
-                    tiempo = f"{minutos:.0f} minutos"
-                texto += f"{i}. Cada {tiempo}: {msg.get('mensaje', '')[:40]}...\n"
+                    tiempo = f"{minutos:.0f}min"
+                texto += f"{i}. Cada {tiempo}: {msg.get('mensaje', '')[:30]}...\n"
                 if msg.get('media'):
                     texto += "   🖼️ Con media\n"
         else:
             texto += "No hay mensajes programados.\n"
         
         texto += "\n*Comandos:*\n"
-        texto += "• /addmsg `segundos|mensaje` - Agregar mensaje\n"
-        texto += "• /addmedia `segundos` - Agregar con foto/video\n"
-        texto += "• /removemsg `número` - Eliminar mensaje\n"
-        texto += "• /listmsg - Listar mensajes\n\n"
-        texto += "*Ejemplos:*\n"
-        texto += "`/addmsg 120|¡Hola {nombre}! Recuerda participar!` (cada 2 min)\n"
-        texto += "`/addmsg 3600|¡Hola {nombre}! Nuevo video!` (cada 1 hora)"
+        texto += "/addmsg `segundos|mensaje`\n"
+        texto += "/addmedia `segundos`\n"
+        texto += "/removemsg `número`\n"
+        texto += "/listmsg - Listar\n\n"
+        texto += "*Ejemplo:*\n"
+        texto += "`/addmsg 120|¡Hola {nombre}!` (cada 2 min)"
         
         keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(texto, parse_mode="Markdown", reply_markup=reply_markup)
     
-    # ---------- FORMATO DE TEXTO ----------
+    # ---------- FORMATO ----------
     elif data == "menu_formato":
         formato = config.get('formato_texto', 'markdown')
         
@@ -369,9 +516,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            f"🎨 *Formato de Texto*\n\n"
-            f"*Formato actual:* `{formato}`\n\n"
-            f"Selecciona el formato que prefieras:\n\n"
+            f"🎨 *FORMATO DE TEXTO*\n\n"
+            f"*Actual:* `{formato}`\n\n"
             f"*Markdown:*\n"
             f"• `*negrita*`\n"
             f"• `_cursiva_`\n"
@@ -387,13 +533,13 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "formato_markdown":
         config['formato_texto'] = 'markdown'
         guardar_config(config)
-        await query.edit_message_text("✅ Formato cambiado a Markdown")
+        await query.edit_message_text("✅ Formato: Markdown")
         await menu_principal(update, context)
     
     elif data == "formato_html":
         config['formato_texto'] = 'html'
         guardar_config(config)
-        await query.edit_message_text("✅ Formato cambiado a HTML")
+        await query.edit_message_text("✅ Formato: HTML")
         await menu_principal(update, context)
     
     # ---------- VISTA PREVIA ----------
@@ -404,26 +550,25 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---------- RESET ----------
     elif data == "menu_reset":
         keyboard = [
-            [InlineKeyboardButton("✅ Sí, resetear todo", callback_data="reset_confirm")],
-            [InlineKeyboardButton("❌ No, cancelar", callback_data="menu_back")]
+            [InlineKeyboardButton("✅ Sí", callback_data="reset_confirm")],
+            [InlineKeyboardButton("❌ No", callback_data="menu_back")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
-            "⚠️ *¿Estás seguro?*\n\n"
-            "Esto eliminará toda la configuración:\n"
-            "• Mensaje de bienvenida\n"
-            "• Botones\n"
-            "• Media\n"
-            "• Mensajes programados\n\n"
-            "Esta acción no se puede deshacer.",
+            "⚠️ *¿RESETEAR TODO?*\n\n"
+            "Esto eliminará TODA la configuración.\n"
+            "No se puede deshacer.",
             parse_mode="Markdown",
             reply_markup=reply_markup
         )
     
     elif data == "reset_confirm":
         guardar_config(config_default)
-        await query.edit_message_text("✅ Configuración restaurada a valores predeterminados.")
+        # Borrar registro
+        with open(ARCHIVO_REGISTRO, "w") as f:
+            json.dump({"usuarios": {}}, f)
+        await query.edit_message_text("✅ Todo reseteado correctamente.")
         await menu_principal(update, context)
     
     # ---------- STATUS ----------
@@ -431,45 +576,38 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         botones = config.get('botones', [])
         mensajes = config.get('mensajes_programados', [])
         media = config.get('media_bienvenida')
-        formato = config.get('formato_texto', 'markdown')
-        auto_aprobar = config.get('auto_aprobar', True)
-        tiempo = config.get('tiempo_aprobacion', 0)
+        registro = cargar_registro()
+        usuarios = registro.get('usuarios', {})
         
-        texto = "ℹ️ *Estado del Bot*\n\n"
+        texto = "📊 *ESTADO DEL BOT*\n\n"
         texto += f"✅ Bot activo\n"
-        texto += f"✅ Auto-Aprobación: {'Activada' if auto_aprobar else 'Desactivada'}\n"
-        if tiempo > 0:
-            texto += f"⏰ Tiempo: {tiempo/60:.0f} minutos\n"
-        else:
-            texto += f"⚡ Tiempo: Inmediata\n"
+        texto += f"👥 Usuarios registrados: {len(usuarios)}\n"
         texto += f"📝 Mensaje: {len(config.get('mensaje_bienvenida', ''))} caracteres\n"
         texto += f"🖼️ Media: {'✅' if media else '❌'}\n"
         texto += f"🔘 Botones: {len(botones)}\n"
-        texto += f"📨 Mensajes programados: {len(mensajes)}\n"
-        texto += f"🎨 Formato: {formato}\n"
-        texto += f"👤 Admin ID: {ID_ADMIN}\n"
-        
-        if config.get('grupo_id'):
-            texto += f"👥 Grupo ID: {config.get('grupo_id')}\n"
+        texto += f"📨 Programados: {len(mensajes)}\n"
+        texto += f"🎨 Formato: {config.get('formato_texto', 'markdown')}\n"
+        texto += f"✅ Auto-aprobar: {'✅' if config.get('auto_aprobar', True) else '❌'}\n"
+        texto += f"🔒 Protección: {'✅' if config.get('proteger_mensajes', True) else '❌'}"
         
         keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data="menu_back")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(texto, parse_mode="Markdown", reply_markup=reply_markup)
     
-    # ---------- BOTÓN ATRÁS ----------
+    # ---------- ATRÁS ----------
     elif data == "menu_back":
         await menu_principal(update, context)
 
-# ==================== COMANDOS DE CONFIGURACIÓN ====================
+# ==================== COMANDOS ====================
 
 async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ID_ADMIN:
         return
     await update.message.reply_text(
-        "✏️ Envía el nuevo mensaje de bienvenida.\n\n"
-        "Usa `{nombre}` para mostrar el nombre del usuario.\n"
-        "Para cancelar, escribe /cancelar",
+        "✏️ Envía el mensaje de bienvenida.\n\n"
+        "Usa `{nombre}` para el nombre.\n"
+        "Para cancelar: /cancelar",
         parse_mode="Markdown"
     )
     context.user_data['esperando'] = 'welcome'
@@ -479,14 +617,15 @@ async def set_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await update.message.reply_text(
-        "🔘 *Configurar Botones*\n\n"
+        "🎨 *Configurar Botones con Colores*\n\n"
         "*Formato:*\n"
-        "`Texto|url, Texto2|url2`\n\n"
-        "*Botón compartir grupo:*\n"
-        "Escribe `Compartir grupo`\n\n"
+        "`Texto|url|color`\n\n"
+        "*Colores:*\n"
+        "🔵 primary, ⚪ secondary, 🟢 success, 🔴 danger, 🟡 warning\n\n"
+        "*Botón Compartir:* `Compartir grupo`\n\n"
         "*Ejemplo:*\n"
-        "`📢 Canal|https://t.me/mi_canal, 📤 Compartir grupo`\n\n"
-        "Para cancelar, escribe /cancelar",
+        "`📢 Canal|https://t.me/canal|primary, 📤 Compartir grupo`\n\n"
+        "Para cancelar: /cancelar",
         parse_mode="Markdown"
     )
     context.user_data['esperando'] = 'buttons'
@@ -497,7 +636,7 @@ async def reset_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = cargar_config()
     config['botones'] = []
     guardar_config(config)
-    await update.message.reply_text("✅ Todos los botones eliminados.")
+    await update.message.reply_text("✅ Botones eliminados.")
 
 async def preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ID_ADMIN:
@@ -509,11 +648,11 @@ async def preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media = config.get('media_bienvenida')
     formato = config.get('formato_texto', 'markdown')
     
-    mensaje_personalizado = mensaje.replace('{nombre}', 'Usuario de Prueba')
+    mensaje_personalizado = mensaje.replace('{nombre}', 'Usuario')
     
     keyboard = []
     for b in botones:
-        if b.get('texto') in ["📤 Compartir grupo", "Compartir grupo"]:
+        if b.get('texto') in ["Compartir grupo", "📤 Compartir grupo"]:
             keyboard.append([InlineKeyboardButton("📤 Compartir grupo", switch_inline_query="")])
         elif b.get('url'):
             keyboard.append([InlineKeyboardButton(b['texto'], url=b['url'])])
@@ -547,44 +686,40 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ID_ADMIN:
         return
     guardar_config(config_default)
-    await update.message.reply_text("✅ Configuración restaurada.")
+    with open(ARCHIVO_REGISTRO, "w") as f:
+        json.dump({"usuarios": {}}, f)
+    await update.message.reply_text("✅ Todo reseteado.")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ID_ADMIN:
         return
     config = cargar_config()
-    botones = config.get('botones', [])
-    mensajes = config.get('mensajes_programados', [])
-    media = config.get('media_bienvenida')
-    
+    registro = cargar_registro()
     await update.message.reply_text(
-        f"ℹ️ *Estado*\n\n"
+        f"📊 *Estado*\n\n"
         f"✅ Bot activo\n"
-        f"📝 {len(config.get('mensaje_bienvenida', ''))} caracteres\n"
-        f"🖼️ Media: {'✅' if media else '❌'}\n"
-        f"🔘 {len(botones)} botones\n"
-        f"📨 {len(mensajes)} mensajes programados",
+        f"👥 Usuarios: {len(registro.get('usuarios', {}))}\n"
+        f"📝 Mensaje: {len(config.get('mensaje_bienvenida', ''))} caracteres\n"
+        f"🔘 Botones: {len(config.get('botones', []))}",
         parse_mode="Markdown"
     )
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('esperando', None)
-    context.user_data.pop('esperando_media', None)
+    context.user_data.clear()
     await update.message.reply_text("✅ Operación cancelada.")
 
 async def set_grupo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ID_ADMIN:
         return
     
-    if not update.message.chat.type in ['group', 'supergroup']:
-        await update.message.reply_text("❌ Este comando solo funciona en grupos.")
+    if update.message.chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ Solo en grupos.")
         return
     
     config = cargar_config()
     config['grupo_id'] = update.message.chat.id
     guardar_config(config)
-    
-    await update.message.reply_text(f"✅ Grupo configurado correctamente.\nID: {update.message.chat.id}")
+    await update.message.reply_text(f"✅ Grupo configurado ID: {update.message.chat.id}")
 
 # ==================== MENSAJES PROGRAMADOS ====================
 
@@ -597,21 +732,21 @@ async def add_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 2:
             await update.message.reply_text(
                 "❌ Usa: `/addmsg segundos|mensaje`\n"
-                "Ejemplo: `/addmsg 120|¡Hola {nombre}!` (cada 2 minutos)",
+                "Ejemplo: `/addmsg 120|¡Hola {nombre}!`",
                 parse_mode="Markdown"
             )
             return
         
         partes = args[1].split('|', 1)
         if len(partes) != 2:
-            await update.message.reply_text("❌ Formato incorrecto. Usa: `segundos|mensaje`")
+            await update.message.reply_text("❌ Formato: `segundos|mensaje`")
             return
         
         segundos = float(partes[0])
         mensaje = partes[1]
         
         if segundos < 60:
-            await update.message.reply_text("⚠️ El mínimo es 60 segundos (1 minuto)")
+            await update.message.reply_text("⚠️ Mínimo 60 segundos")
             return
         
         config = cargar_config()
@@ -626,11 +761,9 @@ async def add_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         guardar_config(config)
         
         if segundos >= 3600:
-            horas = segundos / 3600
-            await update.message.reply_text(f"✅ Mensaje programado cada {horas:.1f} horas")
+            await update.message.reply_text(f"✅ Mensaje cada {segundos/3600:.1f} horas")
         else:
-            minutos = segundos / 60
-            await update.message.reply_text(f"✅ Mensaje programado cada {minutos:.0f} minutos")
+            await update.message.reply_text(f"✅ Mensaje cada {segundos/60:.0f} minutos")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -644,24 +777,18 @@ async def add_mensaje_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(args) < 2:
             await update.message.reply_text(
                 "❌ Usa: `/addmedia segundos`\n"
-                "Luego envía la foto o video",
+                "Luego envía la foto/video",
                 parse_mode="Markdown"
             )
             return
         
         segundos = float(args[1])
         if segundos < 60:
-            await update.message.reply_text("⚠️ El mínimo es 60 segundos (1 minuto)")
+            await update.message.reply_text("⚠️ Mínimo 60 segundos")
             return
         
         context.user_data['esperando_media'] = segundos
-        
-        if segundos >= 3600:
-            horas = segundos / 3600
-            await update.message.reply_text(f"📤 Envía la foto o video para el mensaje programado cada {horas:.1f} horas")
-        else:
-            minutos = segundos / 60
-            await update.message.reply_text(f"📤 Envía la foto o video para el mensaje programado cada {minutos:.0f} minutos")
+        await update.message.reply_text(f"📤 Envía la foto/video para cada {segundos/60:.0f} minutos")
         
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -682,7 +809,7 @@ async def remove_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 0 <= num < len(config.get('mensajes_programados', [])):
             eliminado = config['mensajes_programados'].pop(num)
             guardar_config(config)
-            await update.message.reply_text(f"✅ Mensaje eliminado: {eliminado.get('mensaje', '')[:30]}...")
+            await update.message.reply_text(f"✅ Eliminado: {eliminado.get('mensaje', '')[:30]}...")
         else:
             await update.message.reply_text("❌ Número inválido")
             
@@ -700,36 +827,32 @@ async def list_mensajes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📨 No hay mensajes programados.")
         return
     
-    texto = "📨 *Mensajes Programados:*\n\n"
+    texto = "📨 *Mensajes:*\n\n"
     for i, msg in enumerate(mensajes, 1):
         segundos = msg.get('intervalo', 3600)
         if segundos >= 3600:
-            horas = segundos / 3600
-            tiempo = f"{horas:.1f} horas"
+            tiempo = f"{segundos/3600:.1f}h"
         else:
-            minutos = segundos / 60
-            tiempo = f"{minutos:.0f} minutos"
-        texto += f"{i}. Cada {tiempo}: {msg.get('mensaje', '')[:50]}...\n"
+            tiempo = f"{segundos/60:.0f}min"
+        texto += f"{i}. Cada {tiempo}: {msg.get('mensaje', '')[:40]}...\n"
         if msg.get('media'):
             texto += "   🖼️ Con media\n"
     
     await update.message.reply_text(texto, parse_mode="Markdown")
 
 async def enviar_mensaje_programado(context: ContextTypes.DEFAULT_TYPE):
-    """Envía mensajes programados a todos los miembros del grupo"""
+    """Envía mensajes programados"""
     try:
         config = cargar_config()
         grupo_id = config.get('grupo_id')
         
         if not grupo_id:
-            logger.warning("No hay grupo configurado")
             return
         
         try:
             chat_members = await context.bot.get_chat_administrators(grupo_id)
-            user_ids = [member.user.id for member in chat_members]
+            user_ids = [m.user.id for m in chat_members]
         except:
-            logger.warning("No se pueden obtener miembros")
             return
         
         for msg_config in config.get('mensajes_programados', []):
@@ -744,27 +867,27 @@ async def enviar_mensaje_programado(context: ContextTypes.DEFAULT_TYPE):
                     except:
                         nombre = "Usuario"
                     
-                    texto_personalizado = mensaje.replace('{nombre}', nombre)
+                    texto = mensaje.replace('{nombre}', nombre)
                     
                     if media and media.get('file_id'):
                         if media.get('tipo') == 'foto':
                             await context.bot.send_photo(
                                 chat_id=user_id,
                                 photo=media.get('file_id'),
-                                caption=texto_personalizado,
+                                caption=texto,
                                 parse_mode="Markdown"
                             )
                         elif media.get('tipo') == 'video':
                             await context.bot.send_video(
                                 chat_id=user_id,
                                 video=media.get('file_id'),
-                                caption=texto_personalizado,
+                                caption=texto,
                                 parse_mode="Markdown"
                             )
                     else:
                         await context.bot.send_message(
                             chat_id=user_id,
-                            text=texto_personalizado,
+                            text=texto,
                             parse_mode="Markdown"
                         )
                     
@@ -776,28 +899,10 @@ async def enviar_mensaje_programado(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error en enviar_mensaje_programado: {str(e)}")
 
-async def programar_mensajes(application: Application):
-    config = cargar_config()
-    
-    for msg_config in config.get('mensajes_programados', []):
-        intervalo = msg_config.get('intervalo', 3600)
-        application.job_queue.run_repeating(
-            enviar_mensaje_programado,
-            interval=intervalo,
-            first=10,
-            name="mensaje_programado"
-        )
-        if intervalo >= 3600:
-            horas = intervalo / 3600
-            logger.info(f"📨 Mensaje programado cada {horas:.1f} horas")
-        else:
-            minutos = intervalo / 60
-            logger.info(f"📨 Mensaje programado cada {minutos:.0f} minutos")
-
-# ==================== SOLICITUDES DE UNIÓN (CORREGIDO) ====================
+# ==================== SOLICITUDES DE UNIÓN ====================
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja las solicitudes de unión a grupos"""
+    """Maneja solicitudes de unión"""
     try:
         if not update.chat_join_request:
             return
@@ -806,146 +911,156 @@ async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE
         user = join_request.from_user
         chat = join_request.chat
         
-        logger.info(f"🔵 Nueva solicitud de {user.first_name} (@{user.username})")
+        logger.info(f"🔵 Solicitud de {user.first_name}")
         
-        # Guardar ID del grupo
+        # Guardar grupo
         config = cargar_config()
         if not config.get('grupo_id'):
             config['grupo_id'] = chat.id
             guardar_config(config)
-            logger.info(f"📌 Grupo guardado: {chat.title} (ID: {chat.id})")
         
-        # ✅ ENVIAR MENSAJE DE BIENVENIDA AL PV ANTES DE APROBAR
-        await enviar_bienvenida_pv(update, context, user, chat)
+        # Registrar usuario
+        registro = cargar_registro()
+        user_id = str(user.id)
         
-        # Verificar auto-aprobación
+        if user_id not in registro.get('usuarios', {}):
+            registro['usuarios'][user_id] = {
+                "nombre": user.first_name,
+                "username": user.username,
+                "fecha": datetime.now().isoformat(),
+                "veces": 1
+            }
+        else:
+            registro['usuarios'][user_id]['veces'] += 1
+            registro['usuarios'][user_id]['ultima'] = datetime.now().isoformat()
+        
+        guardar_registro(registro)
+        
+        # Verificar si es reingreso
+        es_reingreso = registro['usuarios'][user_id]['veces'] > 1
+        
+        # ENVIAR MENSAJE AL PV
+        await enviar_bienvenida_pv(update, context, user, chat, es_reingreso)
+        
+        # Auto-aprobación
         auto_aprobar = config.get('auto_aprobar', True)
         tiempo_aprobacion = config.get('tiempo_aprobacion', 0)
         
         if auto_aprobar:
             if tiempo_aprobacion > 0:
-                # ✅ Aprobar después del tiempo configurado
-                logger.info(f"⏰ Esperando {tiempo_aprobacion} segundos para aprobar a {user.first_name}")
-                
                 # Programar aprobación
                 context.application.job_queue.run_once(
                     aprobar_solicitud,
                     tiempo_aprobacion,
                     chat_id=chat.id,
-                    user_id=user.id,
-                    name=f"aprobar_{user.id}"
+                    user_id=user.id
                 )
-                
-                # Enviar mensaje al admin
                 await context.bot.send_message(
                     chat_id=ID_ADMIN,
-                    text=f"⏰ Solicitud de {user.first_name} será aprobada en {tiempo_aprobacion/60:.0f} minutos"
+                    text=f"⏰ {user.first_name} aprobado en {tiempo_aprobacion}s"
                 )
             else:
-                # ✅ Aprobación inmediata
                 await aprobar_solicitud(context, chat_id=chat.id, user_id=user.id)
         else:
-            # ❌ No aprobar automáticamente
-            logger.info(f"❌ Auto-aprobación desactivada para {user.first_name}")
             await context.bot.send_message(
                 chat_id=ID_ADMIN,
-                text=f"❌ Nueva solicitud de {user.first_name} (@{user.username})\n"
-                     f"Pendiente de aprobación manual."
+                text=f"❌ Solicitud de {user.first_name} - Pendiente"
             )
         
         return WAITING_FOR_RESPONSE
         
     except Exception as e:
-        logger.error(f"Error en handle_join_request: {str(e)}")
+        logger.error(f"Error: {str(e)}")
         return None
 
-async def enviar_bienvenida_pv(update: Update, context: ContextTypes.DEFAULT_TYPE, user, chat):
-    """Envía el mensaje de bienvenida al PV del usuario"""
+async def enviar_bienvenida_pv(update: Update, context: ContextTypes.DEFAULT_TYPE, user, chat, es_reingreso=False):
+    """Envía mensaje de bienvenida al PV"""
     try:
         config = cargar_config()
         
-        mensaje = config.get('mensaje_bienvenida', config_default['mensaje_bienvenida'])
+        if es_reingreso:
+            mensaje = config.get('mensaje_reingreso', config_default['mensaje_reingreso'])
+            media = config.get('media_reingreso')
+        else:
+            mensaje = config.get('mensaje_bienvenida', config_default['mensaje_bienvenida'])
+            media = config.get('media_bienvenida')
+        
         botones = config.get('botones', config_default['botones'])
-        media = config.get('media_bienvenida')
         formato = config.get('formato_texto', 'markdown')
         
-        # Personalizar mensaje
+        # Personalizar
         mensaje_personalizado = mensaje.replace('{nombre}', user.first_name)
         
         # Crear botones
         keyboard = []
         for b in botones:
-            if b.get('texto') in ["📤 Compartir grupo", "Compartir grupo"]:
+            if b.get('texto') in ["Compartir grupo", "📤 Compartir grupo"]:
                 keyboard.append([InlineKeyboardButton("📤 Compartir grupo", switch_inline_query="")])
             elif b.get('url'):
                 keyboard.append([InlineKeyboardButton(b['texto'], url=b['url'])])
         
         reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
         
-        # ✅ ENVIAR mensaje de bienvenida al PV
+        # Mensaje con protección
         if media and media.get('file_id'):
             if media.get('tipo') == 'foto':
-                await context.bot.send_photo(
+                msg = await context.bot.send_photo(
                     chat_id=user.id,
                     photo=media.get('file_id'),
                     caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
                     parse_mode=formato.upper(),
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    protect_content=config.get('proteger_mensajes', True)
                 )
             elif media.get('tipo') == 'video':
-                await context.bot.send_video(
+                msg = await context.bot.send_video(
                     chat_id=user.id,
                     video=media.get('file_id'),
                     caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
                     parse_mode=formato.upper(),
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
+                    protect_content=config.get('proteger_mensajes', True)
                 )
         else:
-            await context.bot.send_message(
+            msg = await context.bot.send_message(
                 chat_id=user.id,
                 text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
                 parse_mode=formato.upper(),
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                protect_content=config.get('proteger_mensajes', True)
             )
         
-        logger.info(f"✅ Bienvenida enviada al PV de {user.first_name}")
+        logger.info(f"✅ Mensaje enviado a {user.first_name}")
+        
+        # Programar borrado si está activado
+        if config.get('borrar_mensajes_pv', True):
+            tiempo = config.get('tiempo_borrado_pv', 60)
+            if tiempo > 0:
+                context.application.job_queue.run_once(
+                    borrar_mensaje,
+                    tiempo,
+                    chat_id=user.id,
+                    message_id=msg.message_id
+                )
         
     except Exception as e:
-        logger.error(f"Error enviando bienvenida a {user.first_name}: {str(e)}")
+        logger.error(f"Error enviando bienvenida: {str(e)}")
 
 async def aprobar_solicitud(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int):
-    """Aprueba la solicitud de unión"""
+    """Aprueba solicitud"""
     try:
         await context.bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
-        logger.info(f"✅ Solicitud aprobada para usuario {user_id}")
-        
-        # Notificar al admin
-        await context.bot.send_message(
-            chat_id=ID_ADMIN,
-            text=f"✅ Usuario {user_id} aprobado automáticamente."
-        )
-        
+        logger.info(f"✅ Usuario {user_id} aprobado")
     except Exception as e:
-        logger.error(f"Error aprobando solicitud: {str(e)}")
+        logger.error(f"Error aprobando: {str(e)}")
 
-async def handle_user_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Maneja la respuesta del usuario después de unirse"""
+async def borrar_mensaje(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    """Borra un mensaje después de cierto tiempo"""
     try:
-        user_id = update.effective_user.id
-        user_name = update.effective_user.first_name
-        
-        logger.info(f"💬 Respuesta de {user_name}: {update.message.text[:50]}...")
-        
-        await update.message.reply_text(
-            f"✅ Gracias por tu respuesta, {user_name}!",
-            parse_mode="Markdown"
-        )
-        
-        return ConversationHandler.END
-        
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.info(f"🗑️ Mensaje {message_id} borrado en {chat_id}")
     except Exception as e:
-        logger.error(f"Error en handle_user_response: {str(e)}")
-        return ConversationHandler.END
+        logger.error(f"Error borrando mensaje: {str(e)}")
 
 # ==================== MANEJO DE CONFIGURACIÓN ====================
 
@@ -962,27 +1077,38 @@ async def handle_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if estado == 'welcome':
         config['mensaje_bienvenida'] = update.message.text
         guardar_config(config)
-        await update.message.reply_text("✅ Mensaje actualizado.")
+        await update.message.reply_text("✅ Mensaje de bienvenida actualizado.")
         context.user_data.pop('esperando', None)
-        
-        keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data="menu_welcome")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("✅ Configuración guardada", reply_markup=reply_markup)
+    
+    elif estado == 'reingreso':
+        config['mensaje_reingreso'] = update.message.text
+        guardar_config(config)
+        await update.message.reply_text("✅ Mensaje de reingreso actualizado.")
+        context.user_data.pop('esperando', None)
     
     elif estado == 'buttons':
         try:
             nuevos_botones = []
             for item in update.message.text.split(','):
-                parte = item.strip().split('|')
-                if len(parte) == 2:
+                parte = [p.strip() for p in item.strip().split('|')]
+                
+                if len(parte) == 3:
                     nuevos_botones.append({
-                        "texto": parte[0].strip(),
-                        "url": parte[1].strip()
+                        "texto": parte[0],
+                        "url": parte[1],
+                        "color": parte[2]
+                    })
+                elif len(parte) == 2:
+                    nuevos_botones.append({
+                        "texto": parte[0],
+                        "url": parte[1],
+                        "color": "primary"
                     })
                 elif item.strip() in ["Compartir grupo", "📤 Compartir grupo"]:
                     nuevos_botones.append({
                         "texto": "📤 Compartir grupo",
-                        "url": ""
+                        "url": "",
+                        "color": "success"
                     })
             
             if nuevos_botones:
@@ -996,20 +1122,30 @@ async def handle_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Error: {str(e)}")
     
     elif estado == 'media':
+        tipo_media = context.user_data.get('tipo_media', 'bienvenida')
+        
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
-            config['media_bienvenida'] = {"tipo": "foto", "file_id": file_id}
+            if tipo_media == 'bienvenida':
+                config['media_bienvenida'] = {"tipo": "foto", "file_id": file_id}
+            else:
+                config['media_reingreso'] = {"tipo": "foto", "file_id": file_id}
             guardar_config(config)
-            await update.message.reply_text("✅ Foto guardada para la bienvenida.")
-            context.user_data.pop('esperando', None)
+            await update.message.reply_text(f"✅ Foto guardada para {tipo_media}.")
         elif update.message.video:
             file_id = update.message.video.file_id
-            config['media_bienvenida'] = {"tipo": "video", "file_id": file_id}
+            if tipo_media == 'bienvenida':
+                config['media_bienvenida'] = {"tipo": "video", "file_id": file_id}
+            else:
+                config['media_reingreso'] = {"tipo": "video", "file_id": file_id}
             guardar_config(config)
-            await update.message.reply_text("✅ Video guardado para la bienvenida.")
-            context.user_data.pop('esperando', None)
+            await update.message.reply_text(f"✅ Video guardado para {tipo_media}.")
         else:
             await update.message.reply_text("❌ Envía una foto o video.")
+            return
+        
+        context.user_data.pop('esperando', None)
+        context.user_data.pop('tipo_media', None)
 
 async def handle_media_programada(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ID_ADMIN:
@@ -1032,13 +1168,7 @@ async def handle_media_programada(update: Update, context: ContextTypes.DEFAULT_
             "media": {"tipo": "foto", "file_id": file_id}
         })
         guardar_config(config)
-        
-        if segundos >= 3600:
-            horas = segundos / 3600
-            await update.message.reply_text(f"✅ Mensaje con foto programado cada {horas:.1f} horas")
-        else:
-            minutos = segundos / 60
-            await update.message.reply_text(f"✅ Mensaje con foto programado cada {minutos:.0f} minutos")
+        await update.message.reply_text(f"✅ Foto programada cada {segundos/60:.0f} min")
         
     elif update.message.video:
         file_id = update.message.video.file_id
@@ -1048,27 +1178,43 @@ async def handle_media_programada(update: Update, context: ContextTypes.DEFAULT_
             "media": {"tipo": "video", "file_id": file_id}
         })
         guardar_config(config)
-        
-        if segundos >= 3600:
-            horas = segundos / 3600
-            await update.message.reply_text(f"✅ Mensaje con video programado cada {horas:.1f} horas")
-        else:
-            minutos = segundos / 60
-            await update.message.reply_text(f"✅ Mensaje con video programado cada {minutos:.0f} minutos")
+        await update.message.reply_text(f"✅ Video programado cada {segundos/60:.0f} min")
     else:
         await update.message.reply_text("❌ Envía una foto o video.")
         return
     
     context.user_data.pop('esperando_media', None)
 
+async def borrar_mensajes_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Borra los mensajes del usuario en PV"""
+    if update.effective_user.id != ID_ADMIN:
+        return
+    
+    if update.message.chat.type != 'private':
+        return
+    
+    config = cargar_config()
+    if not config.get('borrar_mensajes_pv', True):
+        return
+    
+    try:
+        # Borrar el mensaje del usuario
+        await context.bot.delete_message(
+            chat_id=update.message.chat_id,
+            message_id=update.message.message_id
+        )
+        logger.info(f"🗑️ Mensaje de usuario borrado")
+    except Exception as e:
+        logger.error(f"Error borrando mensaje de usuario: {str(e)}")
+
 # ==================== INICIO ====================
 
 def main():
-    logger.info("🚀 Iniciando bot avanzado...")
+    logger.info("🚀 Iniciando Bot Avanzado Pro...")
     
     application = Application.builder().token(TOKEN).build()
     
-    # ---------- COMANDOS DEL ADMIN ----------
+    # Comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setwelcome", set_welcome))
     application.add_handler(CommandHandler("setbuttons", set_buttons))
@@ -1079,57 +1225,47 @@ def main():
     application.add_handler(CommandHandler("cancelar", cancelar))
     application.add_handler(CommandHandler("setgrupo", set_grupo))
     
-    # ---------- MENSAJES PROGRAMADOS ----------
+    # Mensajes programados
     application.add_handler(CommandHandler("addmsg", add_mensaje))
     application.add_handler(CommandHandler("addmedia", add_mensaje_media))
     application.add_handler(CommandHandler("removemsg", remove_mensaje))
     application.add_handler(CommandHandler("listmsg", list_mensajes))
     
-    # ---------- CALLBACKS DEL MENÚ ----------
-    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|media_|formato_|reset_|auto_|tiempo_"))
+    # Callbacks
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|media_|formato_|reset_|auto_|tiempo_|proteger_|borrar_"))
     
-    # ---------- CONFIGURACIÓN ----------
+    # Configuración
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media_programada))
     
-    # ---------- SOLICITUDES DE UNIÓN ----------
+    # Borrar mensajes de usuarios en PV
+    application.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE, borrar_mensajes_usuario))
+    
+    # Solicitudes de unión
     conv_handler = ConversationHandler(
         entry_points=[ChatJoinRequestHandler(handle_join_request)],
-        states={
-            WAITING_FOR_RESPONSE: [
-                MessageHandler(
-                    filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
-                    handle_user_response
-                )
-            ]
-        },
+        states={},
         fallbacks=[],
         per_chat=False,
-        name="join_request_conversation"
+        name="join_request"
     )
     application.add_handler(conv_handler)
     
-    # ---------- INICIAR MENSAJES PROGRAMADOS ----------
+    # Job Queue
     if application.job_queue:
         config = cargar_config()
-        for msg_config in config.get('mensajes_programados', []):
-            intervalo = msg_config.get('intervalo', 3600)
+        for msg in config.get('mensajes_programados', []):
+            intervalo = msg.get('intervalo', 3600)
             application.job_queue.run_repeating(
                 enviar_mensaje_programado,
                 interval=intervalo,
                 first=10,
                 name="mensaje_programado"
             )
-            if intervalo >= 3600:
-                horas = intervalo / 3600
-                logger.info(f"📨 Mensaje programado cada {horas:.1f} horas")
-            else:
-                minutos = intervalo / 60
-                logger.info(f"📨 Mensaje programado cada {minutos:.0f} minutos")
     else:
         logger.warning("⚠️ JobQueue no disponible")
     
-    logger.info("✅ Bot avanzado iniciado correctamente!")
+    logger.info("✅ Bot iniciado correctamente!")
     logger.info(f"👤 Admin ID: {ID_ADMIN}")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
