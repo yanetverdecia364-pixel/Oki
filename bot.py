@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 ARCHIVO_CONFIG = "config.json"
 ARCHIVO_REGISTRO = "registro.json"
-ARCHIVO_SHARE = "share_progreso.json"
 
 config_default = {
     "grupos": {},
@@ -72,17 +71,6 @@ def guardar_registro(registro):
     with open(ARCHIVO_REGISTRO, "w") as f:
         json.dump(registro, f, indent=4)
 
-def cargar_share():
-    try:
-        with open(ARCHIVO_SHARE, "r") as f:
-            return json.load(f)
-    except:
-        return {"progreso": {}}
-
-def guardar_share(share):
-    with open(ARCHIVO_SHARE, "w") as f:
-        json.dump(share, f, indent=4)
-
 # ==================== OBTENER CONFIG DEL GRUPO ====================
 
 def get_grupo_config(grupo_id):
@@ -115,73 +103,27 @@ def guardar_grupo_config(grupo_id, grupo_config):
     config['grupos'][str(grupo_id)] = grupo_config
     guardar_config(config)
 
-# ==================== CREAR BOTONES AVANZADOS ====================
+# ==================== CREAR BOTONES ====================
 
-def crear_botones_avanzados(botones_config, grupo_id, user_id=None, tipo_share=None):
+def crear_botones(botones_config):
     keyboard = []
     fila = []
     
     for b in botones_config:
         tipo = b.get('tipo', 'url')
         
-        # ✅ BOTÓN SHARE 0/2 - NOMBRE FIJO
-        if tipo == 'share_contador':
-            user_id_share = user_id or "0"
-            share_data = cargar_share()
-            
-            if str(user_id) not in share_data.get('progreso', {}):
-                share_data['progreso'][str(user_id)] = {
-                    "contador": 0,
-                    "maximo": 2,
-                    "completado": False
-                }
-                guardar_share(share_data)
-            
-            progreso = share_data['progreso'][str(user_id)]
-            
-            # ✅ NOMBRE FIJO: "SHARE" + contador
-            texto_boton = f"SHARE ({progreso['contador']}/{progreso['maximo']})"
-            
-            if progreso['completado']:
-                texto_boton = "✅ ACCESO CONCEDIDO"
-            
-            fila.append(InlineKeyboardButton(
-                texto_boton,
-                callback_data=f"share_click_{user_id}"
-            ))
-        
-        elif tipo == 'url':
+        if tipo == 'url':
             fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
-        
         elif tipo == 'share':
-            fila.append(InlineKeyboardButton(
-                b['texto'], 
-                switch_inline_query="¡Mira este grupo increíble!"
-            ))
-        
+            fila.append(InlineKeyboardButton(b['texto'], switch_inline_query="¡Mira este grupo!"))
         elif tipo == 'alert':
-            fila.append(InlineKeyboardButton(
-                b['texto'], 
-                callback_data=f"alert_{b.get('alert_text', '¡Mensaje importante!')}"
-            ))
-        
+            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"alert_{b.get('alert_text', '¡Mensaje!')}"))
         elif tipo == 'edit':
-            fila.append(InlineKeyboardButton(
-                b['texto'], 
-                callback_data=f"edit_{grupo_id}_{b.get('edit_text', 'Texto editado')}"
-            ))
-        
+            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"edit_{b.get('edit_text', 'Editado')}"))
         elif tipo == 'delete':
-            fila.append(InlineKeyboardButton(
-                b['texto'], 
-                callback_data=f"delete_{grupo_id}"
-            ))
-        
+            fila.append(InlineKeyboardButton(b['texto'], callback_data="delete_msg"))
         elif tipo == 'callback':
-            fila.append(InlineKeyboardButton(
-                b['texto'], 
-                callback_data=f"custom_{b.get('callback_data', 'accion')}"
-            ))
+            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"custom_{b.get('callback_data', 'accion')}"))
         
         if len(fila) >= 2:
             keyboard.append(fila)
@@ -191,6 +133,148 @@ def crear_botones_avanzados(botones_config, grupo_id, user_id=None, tipo_share=N
         keyboard.append(fila)
     
     return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+# ==================== SISTEMA DE SHARE PROGRESIVO ====================
+
+# Almacenar estado de share por usuario
+share_estado = {}  # {user_id: {"paso": 0, "mensaje_id": None, "chat_id": None, "texto_boton": ""}}
+
+async def share_progresivo(update, context):
+    """Comando para iniciar el sistema de share progresivo"""
+    if update.effective_user.id != ID_ADMIN:
+        await update.message.reply_text("❌ Solo el admin puede usar este comando.")
+        return
+    
+    user_id = update.effective_user.id
+    
+    # Inicializar estado
+    share_estado[user_id] = {
+        "paso": 0,
+        "mensaje_id": None,
+        "chat_id": update.message.chat_id,
+        "texto_boton": ""
+    }
+    
+    keyboard = [
+        [InlineKeyboardButton("📤 COMPARTIR (0/2)", callback_data=f"share_paso_{user_id}")],
+        [InlineKeyboardButton("🔄 Reiniciar", callback_data=f"share_reset_{user_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    msg = await update.message.reply_text(
+        "📊 *SISTEMA DE COMPARTIR*\n\n"
+        "Presiona el botón *COMPARTIR* para simular que compartes el enlace.\n"
+        "Necesitas compartir *2 veces* para obtener acceso.\n\n"
+        "📌 *Progreso:* 0/2",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
+    )
+    
+    share_estado[user_id]["mensaje_id"] = msg.message_id
+    share_estado[user_id]["texto_boton"] = "📤 COMPARTIR (0/2)"
+
+async def share_callback(update, context):
+    """Maneja los clics en el botón de compartir"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    parts = data.split('_')
+    action = parts[1]
+    user_id = int(parts[2])
+    
+    # Solo el dueño puede usar el botón
+    if update.effective_user.id != user_id:
+        await query.answer("❌ Este botón solo lo puede usar su dueño.", show_alert=True)
+        return
+    
+    if user_id not in share_estado:
+        await query.edit_message_text("❌ Sesión expirada. Usa /share para reiniciar.")
+        return
+    
+    estado = share_estado[user_id]
+    
+    # Reiniciar
+    if action == "reset":
+        estado["paso"] = 0
+        
+        keyboard = [
+            [InlineKeyboardButton("📤 COMPARTIR (0/2)", callback_data=f"share_paso_{user_id}")],
+            [InlineKeyboardButton("🔄 Reiniciar", callback_data=f"share_reset_{user_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "📊 *SISTEMA DE COMPARTIR*\n\n"
+            "Presiona el botón *COMPARTIR* para simular que compartes el enlace.\n"
+            "Necesitas compartir *2 veces* para obtener acceso.\n\n"
+            "📌 *Progreso:* 0/2",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        return
+    
+    # PASO 0 -> 1: Primer click
+    if action == "paso" and estado["paso"] == 0:
+        estado["paso"] = 1
+        
+        # Mensaje de felicitaciones
+        keyboard = [
+            [InlineKeyboardButton("📤 COMPARTIR (1/2)", callback_data=f"share_paso_{user_id}")],
+            [InlineKeyboardButton("🔄 Reiniciar", callback_data=f"share_reset_{user_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🎉 *¡FELICIDADES!*\n\n"
+            "Has compartido el enlace *1 vez*.\n\n"
+            "📌 *Progreso:* 1/2\n\n"
+            "Presiona nuevamente *COMPARTIR* para completar el proceso.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        
+        await query.answer("✅ ¡Has compartido 1 vez!", show_alert=True)
+        return
+    
+    # PASO 1 -> 2: Segundo click (completa)
+    if action == "paso" and estado["paso"] == 1:
+        estado["paso"] = 2
+        
+        # Botón de acceso
+        keyboard = [
+            [InlineKeyboardButton("✅ ACCESO CONCEDIDO", callback_data=f"share_acceso_{user_id}")],
+            [InlineKeyboardButton("🔄 Reiniciar", callback_data=f"share_reset_{user_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            "🎉 *¡ACCESO CONCEDIDO!*\n\n"
+            "Has completado el proceso de *2/2*.\n"
+            "Ahora puedes acceder al grupo.\n\n"
+            "🔗 *[Haz clic aquí para unirte](https://t.me/+tu_enlace_aqui)*",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        
+        await query.answer("🎉 ¡Completaste 2/2!", show_alert=True)
+        return
+    
+    # ACCESO CONCEDIDO
+    if action == "acceso":
+        await query.answer("🎉 ¡ACCESO CONCEDIDO!", show_alert=True)
+        
+        await query.edit_message_text(
+            "✅ *¡FELICIDADES!*\n\n"
+            "Has completado el progreso de 2/2.\n"
+            "Ahora puedes acceder al grupo.\n\n"
+            "🔗 [Haz clic aquí para unirte](https://t.me/+tu_enlace_aqui)",
+            parse_mode="Markdown"
+        )
+        
+        # Aquí puedes aprobar al usuario automáticamente
+        # await context.bot.approve_chat_join_request(chat_id=grupo_id, user_id=user_id)
+        return
 
 # ==================== COMANDO START ====================
 
@@ -215,13 +299,12 @@ async def start(update, context):
             chat_id=ID_ADMIN,
             text=f"📌 *Grupo Configurado*\n\n"
                  f"ID: `{grupo_id}`\n"
-                 f"Nombre: {update.message.chat.title}\n\n"
-                 f"Usa /start en privado para configurar.",
+                 f"Nombre: {update.message.chat.title}",
             parse_mode="Markdown"
         )
         return
     
-    # ✅ EN PV: Mostrar todos los grupos
+    # EN PV: Mostrar grupos
     config = cargar_config()
     grupos = config.get('grupos', {})
     
@@ -316,166 +399,41 @@ async def menu_callback(update, context):
     action = parts[0]
     grupo_id = parts[-1] if len(parts) > 2 else None
     
-    # ✅ BOTÓN SHARE ESPECIAL - CUALQUIERA PUEDE USARLO
-    if action == "share" and parts[1] == "click":
-        user_id = int(parts[2])
-        
-        # ✅ AHORA CUALQUIERA PUEDE USAR SU PROPIO BOTÓN
-        if update.effective_user.id != user_id:
-            await query.answer("❌ Este botón solo lo puede usar su dueño.", show_alert=True)
-            return
-        
-        share_data = cargar_share()
-        
-        if str(user_id) not in share_data.get('progreso', {}):
-            share_data['progreso'][str(user_id)] = {
-                "contador": 0,
-                "maximo": 2,
-                "completado": False
-            }
-        
-        progreso = share_data['progreso'][str(user_id)]
-        
-        if progreso['completado']:
-            await query.answer("✅ ¡Ya completaste el progreso!", show_alert=True)
-            return
-        
-        progreso['contador'] += 1
-        
-        if progreso['contador'] >= progreso['maximo']:
-            progreso['completado'] = True
-            await query.answer("🎉 ¡FELICIDADES! Has completado 2/2", show_alert=True)
-        else:
-            await query.answer(f"✅ Progreso: {progreso['contador']}/{progreso['maximo']}")
-        
-        guardar_share(share_data)
-        
-        # Editar el mensaje
-        try:
-            message = query.message
-            texto_original = message.text or "📊 *SISTEMA DE INVITACIÓN*"
-            
-            grupo_id = message.chat_id
-            grupo_config = get_grupo_config(grupo_id)
-            
-            # Buscar qué tipo de botones usar (bienvenida, despedida, repetidos)
-            botones_usar = grupo_config.get('botones_bienvenida', [])
-            # Si no hay botones de bienvenida, usar los genéricos
-            if not botones_usar:
-                botones_usar = grupo_config.get('botones', [])
-            
-            keyboard = []
-            fila = []
-            
-            for b in botones_usar:
-                if b.get('tipo') == 'share_contador':
-                    if progreso['completado']:
-                        texto_boton = "✅ ACCESO CONCEDIDO"
-                        fila.append(InlineKeyboardButton(
-                            texto_boton,
-                            callback_data=f"share_acceso_{user_id}"
-                        ))
-                    else:
-                        texto_boton = f"SHARE ({progreso['contador']}/{progreso['maximo']})"
-                        fila.append(InlineKeyboardButton(
-                            texto_boton,
-                            callback_data=f"share_click_{user_id}"
-                        ))
-                elif b.get('tipo') == 'url':
-                    fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
-                elif b.get('tipo') == 'share':
-                    fila.append(InlineKeyboardButton(b['texto'], switch_inline_query="¡Mira este grupo!"))
-                elif b.get('tipo') == 'alert':
-                    fila.append(InlineKeyboardButton(b['texto'], callback_data=f"alert_{b.get('alert_text', '¡Mensaje!')}"))
-                elif b.get('tipo') == 'delete':
-                    fila.append(InlineKeyboardButton(b['texto'], callback_data=f"delete_{grupo_id}"))
-                elif b.get('tipo') == 'edit':
-                    fila.append(InlineKeyboardButton(b['texto'], callback_data=f"edit_{grupo_id}_{b.get('edit_text', 'Editado')}"))
-                elif b.get('tipo') == 'callback':
-                    fila.append(InlineKeyboardButton(b['texto'], callback_data=f"custom_{b.get('callback_data', 'accion')}"))
-                
-                if len(fila) >= 2:
-                    keyboard.append(fila)
-                    fila = []
-            
-            if fila:
-                keyboard.append(fila)
-            
-            if progreso['completado']:
-                keyboard.append([InlineKeyboardButton("✅ ACCESO CONCEDIDO", callback_data=f"share_acceso_{user_id}")])
-            
-            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-            
-            await query.edit_message_text(
-                texto_original,
-                parse_mode="Markdown",
-                reply_markup=reply_markup
-            )
-            
-        except Exception as e:
-            logger.error(f"Error editando mensaje share: {str(e)}")
-        
-        return
-    
-    # ✅ BOTÓN DE ACCESO COMPLETADO
-    if action == "share" and parts[1] == "acceso":
-        user_id = int(parts[2])
-        
-        if update.effective_user.id != user_id:
-            await query.answer("❌ Este botón solo lo puede usar su dueño.", show_alert=True)
-            return
-        
-        await query.answer("🎉 ¡ACCESO CONCEDIDO!", show_alert=True)
-        
-        await query.edit_message_text(
-            "✅ *¡FELICIDADES!*\n\n"
-            "Has completado el progreso de 2/2.\n"
-            "Ahora puedes acceder al grupo.\n\n"
-            "🔗 [Haz clic aquí para unirte](https://t.me/+tu_enlace_aqui)",
-            parse_mode="Markdown"
-        )
-        return
-    
-    # ✅ ALERT - CUALQUIERA PUEDE VER LA ALERTA
+    # ALERT - cualquiera puede ver
     if action == "alert":
         alert_text = data.replace('alert_', '')
         await query.answer(alert_text, show_alert=True)
         return
     
-    # Manejar botones de EDIT
+    # EDIT
     if action == "edit":
-        if len(parts) >= 3:
-            gid = parts[1]
-            edit_text = ' '.join(parts[2:])
-            try:
-                await query.edit_message_text(
-                    f"✏️ *Mensaje editado:*\n\n{edit_text}",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"Error editando: {str(e)}")
+        edit_text = data.replace('edit_', '')
+        await query.edit_message_text(
+            f"✏️ *Mensaje editado:*\n\n{edit_text}",
+            parse_mode="Markdown"
+        )
         return
     
-    # Manejar botones de DELETE
+    # DELETE
     if action == "delete":
         try:
             await query.delete_message()
-        except Exception as e:
-            logger.error(f"Error eliminando: {str(e)}")
+        except:
+            pass
         return
     
-    # Manejar botones CUSTOM
+    # CUSTOM
     if action == "custom":
         custom_data = data.replace('custom_', '')
         await query.answer(f"⚡ Acción: {custom_data}")
         return
     
-    # Si es listar grupos
+    # Listar grupos
     if action == "menu" and parts[1] == "list":
         await listar_grupos(update, context)
         return
     
-    # Si es seleccionar grupo
+    # Seleccionar grupo
     if action == "menu" and parts[1] == "grupo":
         grupo_id = parts[2]
         await menu_principal(update, context, edit=True, grupo_id=int(grupo_id))
@@ -488,7 +446,7 @@ async def menu_callback(update, context):
     grupo_config = get_grupo_config(grupo_id)
     config = cargar_config()
     
-    # ---------- BOTONES BIENVENIDA ----------
+    # ---------- BOTONES ----------
     if action == "menu" and parts[1] == "botones_bienvenida":
         await mostrar_botones_menu(update, context, grupo_id, "bienvenida")
         return
@@ -881,7 +839,7 @@ async def menu_callback(update, context):
         await menu_principal(update, context, edit=True, grupo_id=grupo_id)
         return
 
-# ==================== FUNCIÓN PARA MOSTRAR BOTONES ====================
+# ==================== MOSTRAR BOTONES ====================
 
 async def mostrar_botones_menu(update, context, grupo_id, tipo):
     query = update.callback_query
@@ -901,13 +859,12 @@ async def mostrar_botones_menu(update, context, grupo_id, tipo):
         callback_base = "btn_repetidos"
     
     keyboard = [
-        [InlineKeyboardButton("➕ Agregar URL", callback_data=f"{callback_base}_url_{grupo_id}")],
-        [InlineKeyboardButton("📤 Agregar Share", callback_data=f"{callback_base}_share_{grupo_id}")],
-        [InlineKeyboardButton("📊 Agregar SHARE 0/2", callback_data=f"{callback_base}_share_contador_{grupo_id}")],
-        [InlineKeyboardButton("⚠️ Agregar Alert", callback_data=f"{callback_base}_alert_{grupo_id}")],
-        [InlineKeyboardButton("✏️ Agregar Edit", callback_data=f"{callback_base}_edit_{grupo_id}")],
-        [InlineKeyboardButton("🗑️ Agregar Delete", callback_data=f"{callback_base}_delete_{grupo_id}")],
-        [InlineKeyboardButton("⚡ Agregar Custom", callback_data=f"{callback_base}_custom_{grupo_id}")],
+        [InlineKeyboardButton("➕ URL", callback_data=f"{callback_base}_url_{grupo_id}")],
+        [InlineKeyboardButton("📤 Share", callback_data=f"{callback_base}_share_{grupo_id}")],
+        [InlineKeyboardButton("⚠️ Alert", callback_data=f"{callback_base}_alert_{grupo_id}")],
+        [InlineKeyboardButton("✏️ Edit", callback_data=f"{callback_base}_edit_{grupo_id}")],
+        [InlineKeyboardButton("🗑️ Delete", callback_data=f"{callback_base}_delete_{grupo_id}")],
+        [InlineKeyboardButton("⚡ Custom", callback_data=f"{callback_base}_custom_{grupo_id}")],
         [InlineKeyboardButton("⬆️ Mover Arriba", callback_data=f"{callback_base}_up_{grupo_id}")],
         [InlineKeyboardButton("⬇️ Mover Abajo", callback_data=f"{callback_base}_down_{grupo_id}")],
         [InlineKeyboardButton("🗑️ Eliminar Todos", callback_data=f"{callback_base}_clear_{grupo_id}")],
@@ -920,23 +877,10 @@ async def mostrar_botones_menu(update, context, grupo_id, tipo):
         texto += "*Botones actuales:*\n"
         for i, b in enumerate(botones, 1):
             tipo_btn = b.get('tipo', 'url')
-            emoji = {
-                'url': '🔗', 'share': '📤', 'share_contador': '📊',
-                'alert': '⚠️', 'edit': '✏️', 'delete': '🗑️', 'callback': '⚡'
-            }.get(tipo_btn, '📌')
+            emoji = {'url': '🔗', 'share': '📤', 'alert': '⚠️', 'edit': '✏️', 'delete': '🗑️', 'callback': '⚡'}.get(tipo_btn, '📌')
             texto += f"{i}. {emoji} {b['texto']} ({tipo_btn})\n"
     else:
         texto += "No hay botones configurados.\n"
-    
-    texto += "\n*Tipos de botones:*\n"
-    texto += "• 🔗 URL: Abre un enlace\n"
-    texto += "• 📤 Share: Compartir grupo\n"
-    texto += "• 📊 SHARE 0/2: Contador interactivo (nombre fijo)\n"
-    texto += "• ⚠️ Alert: Muestra popup\n"
-    texto += "• ✏️ Edit: Edita el mensaje\n"
-    texto += "• 🗑️ Delete: Elimina el mensaje\n"
-    texto += "• ⚡ Custom: Acción personalizada\n\n"
-    texto += "*Los botones se muestran 2 por fila*"
     
     await query.edit_message_text(
         texto,
@@ -958,8 +902,7 @@ async def preview_grupo(update, context, grupo_id):
     mensaje_prueba = mensaje_prueba.replace('{perfil}', '[Perfil](tg://user?id=123456789)')
     mensaje_prueba = mensaje_prueba.replace('{id}', '123456789')
     
-    user_id = update.effective_user.id
-    reply_markup = crear_botones_avanzados(botones, grupo_id, user_id)
+    reply_markup = crear_botones(botones)
     
     if media and media.get('file_id'):
         if media.get('tipo') == 'foto':
@@ -1051,14 +994,14 @@ async def add_mensaje_grupo(update, context):
         })
         guardar_grupo_config(grupo_id, grupo_config)
         
-        # ✅ Programar mensaje en job_queue
         if context.application.job_queue:
             context.application.job_queue.run_repeating(
-                enviar_mensaje_programado_grupo,
+                enviar_mensaje_programado,
                 interval=segundos,
                 first=5,
                 name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
-                chat_id=grupo_id
+                chat_id=grupo_id,
+                user_id=grupo_id
             )
             logger.info(f"📨 Mensaje programado cada {segundos/60:.0f} min en grupo {grupo_id}")
         
@@ -1148,8 +1091,8 @@ async def list_mensajes_grupo(update, context):
     
     await update.message.reply_text(texto, parse_mode="Markdown")
 
-# ✅ CORREGIDO: Función mejorada para mensajes programados
-async def enviar_mensaje_programado_grupo(context):
+# ✅ CORREGIDO: Mensajes programados
+async def enviar_mensaje_programado(context):
     try:
         job = context.job
         if not job or not job.name:
@@ -1172,7 +1115,6 @@ async def enviar_mensaje_programado_grupo(context):
             return
         
         if not user_ids:
-            logger.warning(f"No hay miembros en el grupo {grupo_id}")
             return
         
         for msg_config in grupo_config.get('mensajes_programados', []):
@@ -1189,8 +1131,7 @@ async def enviar_mensaje_programado_grupo(context):
                         nombre = "Usuario"
                     
                     texto = mensaje.replace('{nombre}', nombre)
-                    
-                    reply_markup = crear_botones_avanzados(botones, grupo_id, user_id)
+                    reply_markup = crear_botones(botones)
                     
                     if media and media.get('file_id'):
                         if media.get('tipo') == 'foto':
@@ -1223,7 +1164,7 @@ async def enviar_mensaje_programado_grupo(context):
                     logger.error(f"Error enviando a {user_id}: {str(e)}")
                     
     except Exception as e:
-        logger.error(f"Error en enviar_mensaje_programado_grupo: {str(e)}")
+        logger.error(f"Error en enviar_mensaje_programado: {str(e)}")
 
 # ==================== SOLICITUDES DE UNIÓN ====================
 
@@ -1337,7 +1278,7 @@ async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
         mensaje_personalizado = mensaje_personalizado.replace('{perfil}', f'[Perfil](tg://user?id={user.id})')
         mensaje_personalizado = mensaje_personalizado.replace('{id}', str(user.id))
         
-        reply_markup = crear_botones_avanzados(botones, grupo_id, user.id)
+        reply_markup = crear_botones(botones)
         
         if media and media.get('file_id'):
             if media.get('tipo') == 'foto':
@@ -1425,7 +1366,7 @@ async def enviar_despedida_pv(context, user, grupo_id):
         mensaje_personalizado = mensaje_personalizado.replace('{perfil}', f'[Perfil](tg://user?id={user.id})')
         mensaje_personalizado = mensaje_personalizado.replace('{id}', str(user.id))
         
-        reply_markup = crear_botones_avanzados(botones, grupo_id, user.id)
+        reply_markup = crear_botones(botones)
         
         if media and media.get('file_id'):
             if media.get('tipo') == 'foto':
@@ -1489,7 +1430,6 @@ async def handle_config(update, context):
         return
     
     grupo_config = get_grupo_config(grupo_id)
-    config_global = cargar_config()
     
     if estado == 'welcome':
         grupo_config['mensaje_bienvenida'] = update.message.text
@@ -1515,19 +1455,9 @@ async def handle_config(update, context):
         await menu_principal(update, context, grupo_id=grupo_id)
         return
     
-    # ==================== BOTONES BIENVENIDA ====================
-    elif estado.startswith('btn_bienvenida_'):
-        await manejar_agregar_boton(update, context, grupo_id, "bienvenida", estado)
-        return
-    
-    # ==================== BOTONES DESPEDIDA ====================
-    elif estado.startswith('btn_despedida_'):
-        await manejar_agregar_boton(update, context, grupo_id, "despedida", estado)
-        return
-    
-    # ==================== BOTONES REPETIDOS ====================
-    elif estado.startswith('btn_repetidos_'):
-        await manejar_agregar_boton(update, context, grupo_id, "repetidos", estado)
+    # BOTONES - todos los tipos
+    elif estado.startswith('btn_'):
+        await manejar_boton_config(update, context, grupo_id, estado)
         return
     
     elif estado == 'media':
@@ -1559,196 +1489,109 @@ async def handle_config(update, context):
         
         context.user_data.clear()
 
-async def manejar_agregar_boton(update, context, grupo_id, tipo, estado):
-    """Maneja la agregación de botones para cada tipo"""
+async def manejar_boton_config(update, context, grupo_id, estado):
+    """Maneja la configuración de botones"""
     grupo_config = get_grupo_config(grupo_id)
+    
+    # Extraer tipo y acción
+    partes = estado.split('_')
+    # partes: ['btn', 'bienvenida', 'url', 'grupo_id']
+    if len(partes) < 3:
+        return
+    
+    tipo_lista = partes[1]  # bienvenida, despedida, repetidos
+    accion = partes[2]      # url, share, alert, etc
     
     # Determinar qué lista usar
-    if tipo == "bienvenida":
-        lista = "botones_bienvenida"
+    if tipo_lista == "bienvenida":
+        lista_key = "botones_bienvenida"
         nombre = "BIENVENIDA"
-    elif tipo == "despedida":
-        lista = "botones_despedida"
+    elif tipo_lista == "despedida":
+        lista_key = "botones_despedida"
         nombre = "DESPEDIDA"
     else:
-        lista = "botones_repetidos"
+        lista_key = "botones_repetidos"
         nombre = "REPETIDOS"
     
-    # Extraer el tipo de botón
-    btn_tipo = estado.replace(f'btn_{tipo}_', '')
+    if lista_key not in grupo_config:
+        grupo_config[lista_key] = []
     
-    if btn_tipo == 'url':
-        await update.message.reply_text(
-            "🔗 Agrega URL:\n`Texto|https://url.com`\n\nEjemplo:\n`📢 Canal|https://t.me/canal`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_url'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'share':
-        await update.message.reply_text(
-            "📤 Agrega Share:\n`Texto`\n\nEjemplo:\n`Compartir grupo`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_share'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'share_contador':
-        await update.message.reply_text(
-            "📊 Agrega SHARE 0/2:\n`Texto`\n\nEl botón mostrará `SHARE (0/2)`\n*El nombre es fijo, solo cambia el contador*"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_share_contador'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'alert':
-        await update.message.reply_text(
-            "⚠️ Agrega Alert:\n`Texto|Mensaje del popup`\n\nEjemplo:\n`📢 Importante|¡Lee las reglas!`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_alert'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'edit':
-        await update.message.reply_text(
-            "✏️ Agrega Edit:\n`Texto|Nuevo contenido`\n\nEjemplo:\n`📝 Ver más|Este es el nuevo contenido`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_edit'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'delete':
-        await update.message.reply_text(
-            "🗑️ Agrega Delete:\n`Texto`\n\nEjemplo:\n`Eliminar mensaje`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_delete'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'custom':
-        await update.message.reply_text(
-            "⚡ Agrega Custom:\n`Texto|accion`\n\nEjemplo:\n`📊 Stats|estadisticas`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_custom'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'up':
-        # Mover hacia arriba
-        await update.message.reply_text(
-            "⬆️ Envía el número del botón a mover hacia arriba:\n`1`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_up'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'down':
-        # Mover hacia abajo
-        await update.message.reply_text(
-            "⬇️ Envía el número del botón a mover hacia abajo:\n`1`"
-        )
-        context.user_data['esperando'] = f'btn_{tipo}_down'
-        context.user_data['grupo_id'] = grupo_id
-    
-    elif btn_tipo == 'clear':
-        if lista in grupo_config:
-            grupo_config[lista] = []
-            guardar_grupo_config(grupo_id, grupo_config)
-            await update.message.reply_text(f"✅ Botones de {nombre} eliminados.")
-            context.user_data.clear()
-            await menu_principal(update, context, grupo_id=grupo_id)
-
-async def manejar_config_boton(update, context, grupo_id, tipo, btn_tipo):
-    """Maneja la configuración de cada botón"""
-    grupo_config = get_grupo_config(grupo_id)
-    
-    if tipo == "bienvenida":
-        lista = "botones_bienvenida"
-    elif tipo == "despedida":
-        lista = "botones_despedida"
-    else:
-        lista = "botones_repetidos"
-    
-    if lista not in grupo_config:
-        grupo_config[lista] = []
+    texto = update.message.text
     
     try:
-        texto = update.message.text
-        
-        if btn_tipo == 'url':
-            partes = texto.split('|')
-            if len(partes) == 2:
-                grupo_config[lista].append({
+        if accion == 'url':
+            partes_txt = texto.split('|')
+            if len(partes_txt) == 2:
+                grupo_config[lista_key].append({
                     "tipo": "url",
-                    "texto": partes[0].strip(),
-                    "url": partes[1].strip()
+                    "texto": partes_txt[0].strip(),
+                    "url": partes_txt[1].strip()
                 })
                 guardar_grupo_config(grupo_id, grupo_config)
                 await update.message.reply_text("✅ Botón URL agregado")
             else:
                 await update.message.reply_text("❌ Formato: `Texto|https://url.com`")
         
-        elif btn_tipo == 'share':
-            grupo_config[lista].append({
+        elif accion == 'share':
+            grupo_config[lista_key].append({
                 "tipo": "share",
                 "texto": texto.strip()
             })
             guardar_grupo_config(grupo_id, grupo_config)
             await update.message.reply_text("✅ Botón Share agregado")
         
-        elif btn_tipo == 'share_contador':
-            grupo_config[lista].append({
-                "tipo": "share_contador",
-                "texto": texto.strip()
-            })
-            guardar_grupo_config(grupo_id, grupo_config)
-            await update.message.reply_text("✅ Botón SHARE 0/2 agregado")
-        
-        elif btn_tipo == 'alert':
-            partes = texto.split('|')
-            if len(partes) == 2:
-                grupo_config[lista].append({
+        elif accion == 'alert':
+            partes_txt = texto.split('|')
+            if len(partes_txt) == 2:
+                grupo_config[lista_key].append({
                     "tipo": "alert",
-                    "texto": partes[0].strip(),
-                    "alert_text": partes[1].strip()
+                    "texto": partes_txt[0].strip(),
+                    "alert_text": partes_txt[1].strip()
                 })
                 guardar_grupo_config(grupo_id, grupo_config)
                 await update.message.reply_text("✅ Botón Alert agregado")
             else:
                 await update.message.reply_text("❌ Formato: `Texto|Mensaje del popup`")
         
-        elif btn_tipo == 'edit':
-            partes = texto.split('|')
-            if len(partes) == 2:
-                grupo_config[lista].append({
+        elif accion == 'edit':
+            partes_txt = texto.split('|')
+            if len(partes_txt) == 2:
+                grupo_config[lista_key].append({
                     "tipo": "edit",
-                    "texto": partes[0].strip(),
-                    "edit_text": partes[1].strip()
+                    "texto": partes_txt[0].strip(),
+                    "edit_text": partes_txt[1].strip()
                 })
                 guardar_grupo_config(grupo_id, grupo_config)
                 await update.message.reply_text("✅ Botón Edit agregado")
             else:
                 await update.message.reply_text("❌ Formato: `Texto|Nuevo contenido`")
         
-        elif btn_tipo == 'delete':
-            grupo_config[lista].append({
+        elif accion == 'delete':
+            grupo_config[lista_key].append({
                 "tipo": "delete",
                 "texto": texto.strip()
             })
             guardar_grupo_config(grupo_id, grupo_config)
             await update.message.reply_text("✅ Botón Delete agregado")
         
-        elif btn_tipo == 'custom':
-            partes = texto.split('|')
-            if len(partes) == 2:
-                grupo_config[lista].append({
+        elif accion == 'custom':
+            partes_txt = texto.split('|')
+            if len(partes_txt) == 2:
+                grupo_config[lista_key].append({
                     "tipo": "callback",
-                    "texto": partes[0].strip(),
-                    "callback_data": partes[1].strip()
+                    "texto": partes_txt[0].strip(),
+                    "callback_data": partes_txt[1].strip()
                 })
                 guardar_grupo_config(grupo_id, grupo_config)
                 await update.message.reply_text("✅ Botón Custom agregado")
             else:
                 await update.message.reply_text("❌ Formato: `Texto|accion`")
         
-        elif btn_tipo == 'up':
+        elif accion == 'up':
             try:
                 num = int(texto) - 1
-                if 0 <= num < len(grupo_config[lista]) and num > 0:
-                    # Intercambiar con el anterior
-                    grupo_config[lista][num], grupo_config[lista][num-1] = grupo_config[lista][num-1], grupo_config[lista][num]
+                if 0 <= num < len(grupo_config[lista_key]) and num > 0:
+                    grupo_config[lista_key][num], grupo_config[lista_key][num-1] = grupo_config[lista_key][num-1], grupo_config[lista_key][num]
                     guardar_grupo_config(grupo_id, grupo_config)
                     await update.message.reply_text(f"✅ Botón {num+1} movido hacia arriba")
                 else:
@@ -1756,12 +1599,11 @@ async def manejar_config_boton(update, context, grupo_id, tipo, btn_tipo):
             except:
                 await update.message.reply_text("❌ Envía un número válido")
         
-        elif btn_tipo == 'down':
+        elif accion == 'down':
             try:
                 num = int(texto) - 1
-                if 0 <= num < len(grupo_config[lista]) and num < len(grupo_config[lista]) - 1:
-                    # Intercambiar con el siguiente
-                    grupo_config[lista][num], grupo_config[lista][num+1] = grupo_config[lista][num+1], grupo_config[lista][num]
+                if 0 <= num < len(grupo_config[lista_key]) and num < len(grupo_config[lista_key]) - 1:
+                    grupo_config[lista_key][num], grupo_config[lista_key][num+1] = grupo_config[lista_key][num+1], grupo_config[lista_key][num]
                     guardar_grupo_config(grupo_id, grupo_config)
                     await update.message.reply_text(f"✅ Botón {num+1} movido hacia abajo")
                 else:
@@ -1769,33 +1611,16 @@ async def manejar_config_boton(update, context, grupo_id, tipo, btn_tipo):
             except:
                 await update.message.reply_text("❌ Envía un número válido")
         
+        elif accion == 'clear':
+            grupo_config[lista_key] = []
+            guardar_grupo_config(grupo_id, grupo_config)
+            await update.message.reply_text(f"✅ Botones de {nombre} eliminados.")
+        
         context.user_data.clear()
         
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
         context.user_data.clear()
-
-# ==================== BORRAR MENSAJES DEL USUARIO ====================
-
-async def borrar_mensajes_usuario(update, context):
-    if update.effective_user.id != ID_ADMIN:
-        return
-    
-    if update.message.chat.type != 'private':
-        return
-    
-    config = cargar_config()
-    if not config.get('borrar_mensajes_pv', True):
-        return
-    
-    try:
-        await context.bot.delete_message(
-            chat_id=update.message.chat_id,
-            message_id=update.message.message_id
-        )
-        logger.info("🗑️ Mensaje de usuario borrado instantáneamente")
-    except Exception as e:
-        logger.error(f"Error borrando mensaje de usuario: {str(e)}")
 
 # ==================== MANEJO DE MEDIA PROGRAMADA ====================
 
@@ -1829,11 +1654,12 @@ async def handle_media_programada(update, context):
         
         if context.application.job_queue:
             context.application.job_queue.run_repeating(
-                enviar_mensaje_programado_grupo,
+                enviar_mensaje_programado,
                 interval=segundos,
                 first=5,
                 name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
-                chat_id=grupo_id
+                chat_id=grupo_id,
+                user_id=grupo_id
             )
         
     elif update.message.video:
@@ -1848,17 +1674,40 @@ async def handle_media_programada(update, context):
         
         if context.application.job_queue:
             context.application.job_queue.run_repeating(
-                enviar_mensaje_programado_grupo,
+                enviar_mensaje_programado,
                 interval=segundos,
                 first=5,
                 name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
-                chat_id=grupo_id
+                chat_id=grupo_id,
+                user_id=grupo_id
             )
     else:
         await update.message.reply_text("❌ Envía una foto o video.")
         return
     
     context.user_data.clear()
+
+# ==================== BORRAR MENSAJES DEL USUARIO ====================
+
+async def borrar_mensajes_usuario(update, context):
+    if update.effective_user.id != ID_ADMIN:
+        return
+    
+    if update.message.chat.type != 'private':
+        return
+    
+    config = cargar_config()
+    if not config.get('borrar_mensajes_pv', True):
+        return
+    
+    try:
+        await context.bot.delete_message(
+            chat_id=update.message.chat_id,
+            message_id=update.message.message_id
+        )
+        logger.info("🗑️ Mensaje de usuario borrado instantáneamente")
+    except Exception as e:
+        logger.error(f"Error borrando mensaje de usuario: {str(e)}")
 
 # ==================== INICIO ====================
 
@@ -1867,37 +1716,45 @@ def main():
     
     application = Application.builder().token(TOKEN).build()
     
+    # Comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancelar", cancelar))
+    application.add_handler(CommandHandler("share", share_progresivo))  # Comando share
     
+    # Mensajes programados
     application.add_handler(CommandHandler("addmsg", add_mensaje_grupo))
     application.add_handler(CommandHandler("addmedia", add_mensaje_media_grupo))
     application.add_handler(CommandHandler("removemsg", remove_mensaje_grupo))
     application.add_handler(CommandHandler("listmsg", list_mensajes_grupo))
     
-    application.add_handler(CallbackQueryHandler(menu_callback, pattern="share_click_|share_acceso_"))
+    # Callbacks
+    application.add_handler(CallbackQueryHandler(share_callback, pattern="share_paso_|share_reset_|share_acceso_"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|reingreso_|media_|reset_|auto_|t_|proteger_|borrar_|bt_|elim_|btn_|alert_|edit_|delete_|custom_"))
     
+    # Configuración
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
     application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media_programada))
     
+    # Borrar mensajes de usuario en PV
     application.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE, borrar_mensajes_usuario))
     
+    # Solicitudes de unión y salidas
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
     
-    # ✅ Iniciar mensajes programados al arrancar
+    # Iniciar mensajes programados al arrancar
     if application.job_queue:
         config = cargar_config()
         for gid, grupo_config in config.get('grupos', {}).items():
             for i, msg in enumerate(grupo_config.get('mensajes_programados', [])):
                 intervalo = msg.get('intervalo', 3600)
                 application.job_queue.run_repeating(
-                    enviar_mensaje_programado_grupo,
+                    enviar_mensaje_programado,
                     interval=intervalo,
                     first=5,
                     name=f"msg_{gid}_{i+1}",
-                    chat_id=int(gid)
+                    chat_id=int(gid),
+                    user_id=int(gid)
                 )
                 logger.info(f"📨 Mensaje programado en grupo {gid} cada {intervalo/60:.0f} min")
     
