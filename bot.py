@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
@@ -104,39 +104,6 @@ def guardar_grupo_config(grupo_id, grupo_config):
     config['grupos'][str(grupo_id)] = grupo_config
     guardar_config(config)
 
-# ==================== CREAR BOTONES ====================
-def crear_botones(botones_config):
-    if not botones_config:
-        return None
-    
-    keyboard = []
-    fila = []
-    
-    for b in botones_config:
-        tipo = b.get('tipo', 'url')
-        
-        if tipo == 'url':
-            fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
-        elif tipo == 'share':
-            fila.append(InlineKeyboardButton(b['texto'], switch_inline_query="¡Mira este grupo!"))
-        elif tipo == 'alert':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"alert_{b.get('alert_text', '¡Mensaje!')}"))
-        elif tipo == 'edit':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"edit_{b.get('edit_text', 'Editado')}"))
-        elif tipo == 'delete':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data="delete_msg"))
-        elif tipo == 'callback':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"custom_{b.get('callback_data', 'accion')}"))
-        
-        if len(fila) >= 2:
-            keyboard.append(fila)
-            fila = []
-    
-    if fila:
-        keyboard.append(fila)
-    
-    return InlineKeyboardMarkup(keyboard) if keyboard else None
-
 # ==================== VARIABLES PARA MENSAJES ====================
 def obtener_variables(user, chat=None, grupo_config=None):
     variables = {
@@ -160,6 +127,140 @@ def procesar_mensaje(texto, variables):
     for key, value in variables.items():
         texto = texto.replace(key, str(value))
     return texto
+
+# ==================== CREAR BOTONES ====================
+def crear_botones(botones_config):
+    if not botones_config:
+        return None
+    
+    keyboard = []
+    fila = []
+    
+    for b in botones_config:
+        tipo = b.get('tipo', 'url')
+        
+        if tipo == 'url':
+            fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
+        elif tipo == 'share':
+            fila.append(InlineKeyboardButton(b['texto'], switch_inline_query="¡Mira este grupo!"))
+        elif tipo == 'alert':
+            # ✅ CUALQUIERA PUEDE VER ALERT - SIN PERMISOS
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                callback_data=f"alert_{b.get('alert_text', '¡Mensaje!')}"
+            ))
+        elif tipo == 'edit':
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                callback_data=f"edit_{b.get('edit_text', 'Editado')}"
+            ))
+        elif tipo == 'delete':
+            fila.append(InlineKeyboardButton(b['texto'], callback_data="delete_msg"))
+        elif tipo == 'callback':
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                callback_data=f"custom_{b.get('callback_data', 'accion')}"
+            ))
+        elif tipo == 'copy':
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                callback_data=f"copy_{b.get('copy_text', 'Texto copiado')}"
+            ))
+        
+        if len(fila) >= 2:
+            keyboard.append(fila)
+            fila = []
+    
+    if fila:
+        keyboard.append(fila)
+    
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+# ==================== PROCESAR BOTONES CON && ====================
+def procesar_botones_avanzado(texto):
+    """
+    Procesa botones con formato:
+    - Normal: Título - enlace
+    - Misma fila: Título1 - enlace1 && Título2 - enlace2
+    - Popup: Título - popup:Texto
+    - Rules: Título - rules
+    """
+    if not texto:
+        return []
+    
+    botones = []
+    
+    # Dividir por filas (salto de línea)
+    lineas = texto.strip().split('\n')
+    
+    for linea in lineas:
+        if not linea.strip():
+            continue
+        
+        # Verificar si tiene && (misma fila)
+        if ' && ' in linea:
+            # Dividir por && para la misma fila
+            items = linea.split(' && ')
+            for item in items:
+                if ' - ' in item:
+                    partes = item.strip().split(' - ', 1)
+                    boton = crear_boton_desde_texto(partes[0].strip(), partes[1].strip())
+                    if boton:
+                        botones.append(boton)
+        else:
+            # Botón normal en su propia fila
+            if ' - ' in linea:
+                partes = linea.strip().split(' - ', 1)
+                boton = crear_boton_desde_texto(partes[0].strip(), partes[1].strip())
+                if boton:
+                    botones.append(boton)
+    
+    return botones
+
+def crear_boton_desde_texto(titulo, accion):
+    """Crea un botón a partir de título y acción"""
+    if accion.startswith('popup:') or accion.startswith('alert:'):
+        texto_popup = accion.replace('popup:', '').replace('alert:', '')
+        return {
+            "tipo": "alert",
+            "texto": titulo,
+            "alert_text": texto_popup
+        }
+    elif accion == 'rules':
+        return {
+            "tipo": "url",
+            "texto": titulo,
+            "url": "https://t.me/"
+        }
+    elif accion.startswith('share:'):
+        texto_share = accion.replace('share:', '')
+        return {
+            "tipo": "share",
+            "texto": titulo,
+            "share_text": texto_share
+        }
+    elif accion.startswith('copy:'):
+        texto_copy = accion.replace('copy:', '')
+        return {
+            "tipo": "copy",
+            "texto": titulo,
+            "copy_text": texto_copy
+        }
+    elif accion.startswith('t.me/') or accion.startswith('https://'):
+        if not accion.startswith('http'):
+            accion = 'https://' + accion
+        return {
+            "tipo": "url",
+            "texto": titulo,
+            "url": accion
+        }
+    else:
+        # Si no coincide, asumir URL
+        return {
+            "tipo": "url",
+            "texto": titulo,
+            "url": accion
+        }
 
 # ==================== COMANDO START ====================
 async def start(update, context):
@@ -271,10 +372,15 @@ async def menu_callback(update, context):
     
     data = query.data
     
-    # ========== BOTONES DE ACCIÓN RÁPIDA ==========
+    # ========== BOTONES DE ACCIÓN RÁPIDA (SIN PERMISOS) ==========
     if data.startswith("alert_"):
         alert_text = data.replace('alert_', '')
         await query.answer(alert_text, show_alert=True)
+        return
+    
+    if data.startswith("copy_"):
+        copy_text = data.replace('copy_', '')
+        await query.answer(f"📋 Texto copiado:\n{copy_text}", show_alert=True)
         return
     
     if data.startswith("edit_"):
@@ -453,12 +559,14 @@ async def menu_callback(update, context):
             return
         
         await query.edit_message_text(
-            "✏️ *Agregar Botón*\n\n"
-            "Formato:\n"
-            "• URL: `Título - t.me/Link`\n"
+            "✏️ *Agregar Botones*\n\n"
+            "*Formato:*\n"
+            "• Normal: `Título - t.me/Link`\n"
+            "• Misma fila: `Título1 - link1 && Título2 - link2`\n"
             "• Popup: `Título - popup:Texto`\n"
             "• Rules: `Título - rules`\n\n"
-            "Ejemplo: `📢 Canal - t.me/mi_canal`\n\n"
+            "*Ejemplo:*\n"
+            "`📢 Canal - t.me/mi_canal && 📋 Reglas - t.me/reglas`\n\n"
             "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
@@ -809,18 +917,13 @@ async def mostrar_botones_menu(update, context, grupo_id, tipo):
     if botones:
         for i, b in enumerate(botones, 1):
             tipo_btn = b.get('tipo', 'url')
-            emoji = {'url': '🔗', 'share': '📤', 'alert': '⚠️', 'edit': '✏️', 'delete': '🗑️', 'callback': '⚡'}.get(tipo_btn, '📌')
+            emoji = {'url': '🔗', 'share': '📤', 'alert': '⚠️', 'edit': '✏️', 'delete': '🗑️', 'callback': '⚡', 'copy': '📋'}.get(tipo_btn, '📌')
             texto += f"{i}. {emoji} {b['texto']} ({tipo_btn})\n"
     else:
         texto += "No hay botones configurados.\n"
     
     keyboard = [
-        [InlineKeyboardButton("➕ URL", callback_data=f"btn_{tipo}_url_{grupo_id}")],
-        [InlineKeyboardButton("📤 Share", callback_data=f"btn_{tipo}_share_{grupo_id}")],
-        [InlineKeyboardButton("⚠️ Alert/Popup", callback_data=f"btn_{tipo}_alert_{grupo_id}")],
-        [InlineKeyboardButton("✏️ Edit", callback_data=f"btn_{tipo}_edit_{grupo_id}")],
-        [InlineKeyboardButton("🗑️ Delete", callback_data=f"btn_{tipo}_delete_{grupo_id}")],
-        [InlineKeyboardButton("⚡ Custom", callback_data=f"btn_{tipo}_custom_{grupo_id}")],
+        [InlineKeyboardButton("➕ Agregar Botones", callback_data=f"btn_{tipo}_add_{grupo_id}")],
         [InlineKeyboardButton("⬆️ Mover Arriba", callback_data=f"btn_{tipo}_up_{grupo_id}")],
         [InlineKeyboardButton("⬇️ Mover Abajo", callback_data=f"btn_{tipo}_down_{grupo_id}")],
         [InlineKeyboardButton("🗑️ Eliminar Todos", callback_data=f"btn_{tipo}_clear_{grupo_id}")],
@@ -957,6 +1060,37 @@ async def handle_config(update, context):
         await menu_principal(update, context, grupo_id=grupo_id)
         return
     
+    # ========== BOTONES ==========
+    if estado.startswith('btn_'):
+        partes = estado.split('_')
+        if len(partes) >= 3:
+            tipo_lista = partes[1]
+            accion = partes[2]
+            
+            if tipo_lista == "bienvenida":
+                lista_key = "botones_bienvenida"
+            elif tipo_lista == "despedida":
+                lista_key = "botones_despedida"
+            else:
+                lista_key = "botones_repetidos"
+            
+            if lista_key not in grupo_config:
+                grupo_config[lista_key] = []
+            
+            # Procesar botones con formato avanzado (&& para misma fila)
+            botones_nuevos = procesar_botones_avanzado(update.message.text)
+            
+            if botones_nuevos:
+                grupo_config[lista_key].extend(botones_nuevos)
+                guardar_grupo_config(grupo_id, grupo_config)
+                await update.message.reply_text(f"✅ {len(botones_nuevos)} botones agregados")
+            else:
+                await update.message.reply_text("❌ Formato incorrecto. Usa: `Título - t.me/enlace` o `Título1 - link1 && Título2 - link2`")
+            
+            context.user_data.clear()
+            await menu_principal(update, context, grupo_id=grupo_id)
+        return
+    
     # ========== MENSAJES PROGRAMADOS ==========
     if estado == 'addmsg':
         try:
@@ -982,6 +1116,17 @@ async def handle_config(update, context):
             })
             guardar_grupo_config(grupo_id, grupo_config)
             
+            # ✅ Programar mensaje en job_queue
+            if context.application.job_queue:
+                context.application.job_queue.run_repeating(
+                    enviar_mensaje_programado,
+                    interval=segundos,
+                    first=5,
+                    name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
+                    chat_id=grupo_id,
+                    user_id=grupo_id
+                )
+            
             await update.message.reply_text(f"✅ Mensaje programado cada {segundos/60:.0f} minutos")
             context.user_data.clear()
             await menu_principal(update, context, grupo_id=grupo_id)
@@ -1004,75 +1149,6 @@ async def handle_config(update, context):
             await menu_principal(update, context, grupo_id=grupo_id)
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
-        return
-    
-    # ========== BOTONES ==========
-    if estado.startswith('btn_'):
-        partes = estado.split('_')
-        if len(partes) >= 3:
-            tipo_lista = partes[1]
-            accion = partes[2]
-            
-            if tipo_lista == "bienvenida":
-                lista_key = "botones_bienvenida"
-            elif tipo_lista == "despedida":
-                lista_key = "botones_despedida"
-            else:
-                lista_key = "botones_repetidos"
-            
-            if lista_key not in grupo_config:
-                grupo_config[lista_key] = []
-            
-            # Procesar botones
-            texto = update.message.text
-            botones_nuevos = []
-            
-            # Formato: "Título - t.me/Link"
-            if ' - ' in texto:
-                partes_txt = texto.split(' - ', 1)
-                titulo = partes_txt[0].strip()
-                accion_txt = partes_txt[1].strip()
-                
-                if accion_txt.startswith('popup:') or accion_txt.startswith('alert:'):
-                    alert_text = accion_txt.replace('popup:', '').replace('alert:', '')
-                    botones_nuevos.append({
-                        "tipo": "alert",
-                        "texto": titulo,
-                        "alert_text": alert_text
-                    })
-                elif accion_txt == 'rules':
-                    botones_nuevos.append({
-                        "tipo": "url",
-                        "texto": titulo,
-                        "url": "https://t.me/"
-                    })
-                elif accion_txt.startswith('t.me/') or accion_txt.startswith('https://'):
-                    if not accion_txt.startswith('http'):
-                        accion_txt = 'https://' + accion_txt
-                    botones_nuevos.append({
-                        "tipo": "url",
-                        "texto": titulo,
-                        "url": accion_txt
-                    })
-                else:
-                    botones_nuevos.append({
-                        "tipo": "url",
-                        "texto": titulo,
-                        "url": accion_txt
-                    })
-            else:
-                await update.message.reply_text("❌ Formato incorrecto. Usa: `Título - t.me/enlace`")
-                return
-            
-            if botones_nuevos:
-                grupo_config[lista_key].extend(botones_nuevos)
-                guardar_grupo_config(grupo_id, grupo_config)
-                await update.message.reply_text(f"✅ {len(botones_nuevos)} botones agregados")
-            else:
-                await update.message.reply_text("❌ Formato incorrecto")
-            
-            context.user_data.clear()
-            await menu_principal(update, context, grupo_id=grupo_id)
         return
     
     # ========== MEDIA ==========
@@ -1107,25 +1183,88 @@ async def handle_config(update, context):
         await menu_principal(update, context, grupo_id=grupo_id)
         return
 
-# ==================== BORRAR MENSAJES DEL USUARIO ====================
-async def borrar_mensajes_usuario(update, context):
-    if update.effective_user.id != ID_ADMIN:
-        return
-    
-    if update.message.chat.type != 'private':
-        return
-    
-    config = cargar_config()
-    if not config.get('borrar_mensajes_pv', True):
-        return
-    
+# ==================== MENSAJES PROGRAMADOS ====================
+async def enviar_mensaje_programado(context):
     try:
-        await context.bot.delete_message(
-            chat_id=update.message.chat_id,
-            message_id=update.message.message_id
-        )
-    except:
-        pass
+        job = context.job
+        if not job or not job.name:
+            return
+        
+        parts = job.name.split('_')
+        if len(parts) < 2:
+            return
+        grupo_id = int(parts[1])
+        
+        grupo_config = get_grupo_config(grupo_id)
+        config_global = cargar_config()
+        
+        try:
+            chat_members = await context.bot.get_chat_administrators(grupo_id)
+            user_ids = [m.user.id for m in chat_members]
+        except:
+            return
+        
+        if not user_ids:
+            return
+        
+        # Obtener chat para variables
+        try:
+            chat = await context.bot.get_chat(grupo_id)
+        except:
+            chat = None
+        
+        for msg_config in grupo_config.get('mensajes_programados', []):
+            mensaje = msg_config.get('mensaje', '')
+            media = msg_config.get('media')
+            botones = grupo_config.get('botones_repetidos', [])
+            
+            for user_id in user_ids:
+                try:
+                    try:
+                        user = await context.bot.get_chat(user_id)
+                    except:
+                        continue
+                    
+                    variables = obtener_variables(user, chat, grupo_config)
+                    texto = procesar_mensaje(mensaje, variables)
+                    
+                    reply_markup = crear_botones(botones)
+                    
+                    if media and media.get('file_id'):
+                        if media.get('tipo') == 'foto':
+                            await context.bot.send_photo(
+                                chat_id=user_id,
+                                photo=media.get('file_id'),
+                                caption=texto,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup,
+                                protect_content=config_global.get('proteger_mensajes', True)
+                            )
+                        elif media.get('tipo') == 'video':
+                            await context.bot.send_video(
+                                chat_id=user_id,
+                                video=media.get('file_id'),
+                                caption=texto,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup,
+                                protect_content=config_global.get('proteger_mensajes', True)
+                            )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text=texto,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                            protect_content=config_global.get('proteger_mensajes', True)
+                        )
+                    
+                    await asyncio.sleep(0.3)
+                    
+                except Exception as e:
+                    logger.error(f"Error enviando a {user_id}: {str(e)}")
+                    
+    except Exception as e:
+        logger.error(f"Error en enviar_mensaje_programado: {str(e)}")
 
 # ==================== SOLICITUDES DE UNIÓN ====================
 async def handle_join_request(update, context):
@@ -1138,39 +1277,137 @@ async def handle_join_request(update, context):
         chat = join_request.chat
         grupo_id = chat.id
         
+        logger.info(f"🔵 Solicitud de {user.first_name} en grupo {grupo_id}")
+        
         grupo_config = get_grupo_config(grupo_id)
         config_global = cargar_config()
         
+        # Registrar usuario
+        registro = cargar_registro()
+        user_id = str(user.id)
+        
+        if user_id not in registro.get('usuarios', {}):
+            registro['usuarios'][user_id] = {
+                "nombre": user.first_name,
+                "username": user.username,
+                "veces": 1,
+                "fecha": datetime.now().isoformat(),
+                "grupo": str(grupo_id)
+            }
+        else:
+            registro['usuarios'][user_id]['veces'] += 1
+            registro['usuarios'][user_id]['ultima'] = datetime.now().isoformat()
+            registro['usuarios'][user_id]['grupo'] = str(grupo_id)
+        
+        guardar_registro(registro)
+        
+        es_reingreso = registro['usuarios'][user_id]['veces'] > 1
+        
+        # Variables para mensaje
         variables = obtener_variables(user, chat, grupo_config)
         
         # Mensaje de bienvenida
-        mensaje = grupo_config.get('mensaje_bienvenida', config_default['mensaje_bienvenida'])
-        mensaje_personalizado = procesar_mensaje(mensaje, variables)
+        if es_reingreso:
+            mensaje = grupo_config.get('mensaje_reingreso', config_default['mensaje_reingreso'])
+            media = grupo_config.get('media_reingreso')
+        else:
+            mensaje = grupo_config.get('mensaje_bienvenida', config_default['mensaje_bienvenida'])
+            media = grupo_config.get('media_bienvenida')
         
+        mensaje_personalizado = procesar_mensaje(mensaje, variables)
         botones = grupo_config.get('botones_bienvenida', [])
         reply_markup = crear_botones(botones)
         
         # Enviar mensaje al PV
         try:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-                protect_content=config_global.get('proteger_mensajes', True)
-            )
+            if media and media.get('file_id'):
+                if media.get('tipo') == 'foto':
+                    msg = await context.bot.send_photo(
+                        chat_id=user.id,
+                        photo=media.get('file_id'),
+                        caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                        protect_content=config_global.get('proteger_mensajes', True)
+                    )
+                elif media.get('tipo') == 'video':
+                    msg = await context.bot.send_video(
+                        chat_id=user.id,
+                        video=media.get('file_id'),
+                        caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                        protect_content=config_global.get('proteger_mensajes', True)
+                    )
+            else:
+                msg = await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                    protect_content=config_global.get('proteger_mensajes', True)
+                )
+            
+            # ✅ FIJAR MENSAJE
+            if grupo_config.get('fijar_mensaje', False):
+                try:
+                    await context.bot.pin_chat_message(
+                        chat_id=user.id,
+                        message_id=msg.message_id
+                    )
+                    logger.info(f"📌 Mensaje fijado para {user.first_name}")
+                except Exception as e:
+                    logger.error(f"Error fijando mensaje: {str(e)}")
+            
+            # ✅ ELIMINAR BIENVENIDA DESPUÉS DE TIEMPO
+            tiempo_elim = grupo_config.get('tiempo_eliminacion_bienvenida', 0)
+            if tiempo_elim > 0:
+                async def eliminar_bienvenida():
+                    await asyncio.sleep(tiempo_elim)
+                    try:
+                        await context.bot.delete_message(chat_id=user.id, message_id=msg.message_id)
+                        logger.info(f"🗑️ Bienvenida eliminada después de {tiempo_elim}s")
+                    except:
+                        pass
+                
+                asyncio.create_task(eliminar_bienvenida())
+            
+            logger.info(f"✅ Bienvenida enviada a {user.first_name}")
+            
         except Exception as e:
             logger.error(f"Error enviando bienvenida: {str(e)}")
         
-        # Auto-aprobación
+        # ✅ AUTO-APROBACIÓN CON RETRASO (CORREGIDO)
         auto_aprobar = grupo_config.get('auto_aprobar', True)
+        tiempo_aprobacion = grupo_config.get('tiempo_aprobacion', 0)
         
         if auto_aprobar:
-            try:
-                await context.bot.approve_chat_join_request(chat_id=grupo_id, user_id=user.id)
-                logger.info(f"✅ {user.first_name} aprobado")
-            except Exception as e:
-                logger.error(f"Error aprobando: {str(e)}")
+            if tiempo_aprobacion > 0:
+                # ✅ APROBAR DESPUÉS DEL TIEMPO CONFIGURADO
+                logger.info(f"⏰ Esperando {tiempo_aprobacion}s para aprobar a {user.first_name}")
+                
+                async def aprobar_despues():
+                    await asyncio.sleep(tiempo_aprobacion)
+                    try:
+                        await context.bot.approve_chat_join_request(chat_id=grupo_id, user_id=user.id)
+                        logger.info(f"✅ {user.first_name} aprobado después de {tiempo_aprobacion}s")
+                    except Exception as e:
+                        logger.error(f"Error aprobando: {str(e)}")
+                
+                asyncio.create_task(aprobar_despues())
+            else:
+                # Aprobación inmediata
+                try:
+                    await context.bot.approve_chat_join_request(chat_id=grupo_id, user_id=user.id)
+                    logger.info(f"✅ {user.first_name} aprobado inmediatamente")
+                except Exception as e:
+                    logger.error(f"Error aprobando: {str(e)}")
+        else:
+            logger.info(f"❌ Auto-aprobación desactivada para {user.first_name}")
+            await context.bot.send_message(
+                chat_id=ID_ADMIN,
+                text=f"❌ Solicitud de {user.first_name} - Pendiente"
+            )
         
     except Exception as e:
         logger.error(f"Error en handle_join_request: {str(e)}")
@@ -1196,6 +1433,8 @@ async def handle_chat_member_update(update, context):
         if (old_status in ['member', 'administrator', 'creator'] and 
             new_status in ['left', 'kicked']):
             
+            logger.info(f"👋 {user.first_name} salió del grupo {grupo_id}")
+            
             grupo_config = get_grupo_config(grupo_id)
             config_global = cargar_config()
             
@@ -1214,11 +1453,33 @@ async def handle_chat_member_update(update, context):
                     reply_markup=reply_markup,
                     protect_content=config_global.get('proteger_mensajes', True)
                 )
-            except:
-                pass
+                logger.info(f"✅ Despedida enviada a {user.first_name}")
+            except Exception as e:
+                logger.error(f"Error enviando despedida: {str(e)}")
             
     except Exception as e:
         logger.error(f"Error en handle_chat_member_update: {str(e)}")
+
+# ==================== BORRAR MENSAJES DEL USUARIO ====================
+async def borrar_mensajes_usuario(update, context):
+    if update.effective_user.id != ID_ADMIN:
+        return
+    
+    if update.message.chat.type != 'private':
+        return
+    
+    config = cargar_config()
+    if not config.get('borrar_mensajes_pv', True):
+        return
+    
+    try:
+        await context.bot.delete_message(
+            chat_id=update.message.chat_id,
+            message_id=update.message.message_id
+        )
+        logger.info("🗑️ Mensaje de usuario borrado instantáneamente")
+    except Exception as e:
+        logger.error(f"Error borrando mensaje de usuario: {str(e)}")
 
 # ==================== INICIO ====================
 def main():
@@ -1231,7 +1492,7 @@ def main():
     application.add_handler(CommandHandler("cancelar", cancelar))
     
     # Callbacks
-    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|reingreso_|media_|reset_|auto_|t_|proteger_|borrar_|bt_|elim_|btn_|alert_|edit_|delete_|custom_|addmsg_|delmsg_|fijar_|reglas_"))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|reingreso_|media_|reset_|auto_|t_|proteger_|borrar_|bt_|elim_|btn_|alert_|edit_|delete_|custom_|copy_|addmsg_|delmsg_|fijar_|reglas_"))
     
     # Configuración
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
@@ -1243,6 +1504,22 @@ def main():
     # Solicitudes de unión y salidas
     application.add_handler(ChatJoinRequestHandler(handle_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
+    
+    # Iniciar mensajes programados
+    if application.job_queue:
+        config = cargar_config()
+        for gid, grupo_config in config.get('grupos', {}).items():
+            for i, msg in enumerate(grupo_config.get('mensajes_programados', [])):
+                intervalo = msg.get('intervalo', 3600)
+                application.job_queue.run_repeating(
+                    enviar_mensaje_programado,
+                    interval=intervalo,
+                    first=5,
+                    name=f"msg_{gid}_{i+1}",
+                    chat_id=int(gid),
+                    user_id=int(gid)
+                )
+                logger.info(f"📨 Mensaje programado en grupo {gid} cada {intervalo/60:.0f} min")
     
     logger.info("✅ Bot iniciado correctamente!")
     logger.info(f"👤 Admin ID: {ID_ADMIN}")
