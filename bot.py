@@ -2,8 +2,9 @@ import os
 import json
 import logging
 import asyncio
+import re
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -25,12 +26,11 @@ logger = logging.getLogger(__name__)
 ARCHIVO_CONFIG = "config.json"
 ARCHIVO_REGISTRO = "registro.json"
 
-# ==================== CONFIGURACIÓN POR DEFECTO ====================
 config_default = {
     "grupos": {},
     "mensaje_bienvenida": "¡Bienvenido al grupo! 🎉\n\nTe damos la bienvenida a nuestra comunidad.",
-    "mensaje_reingreso": "¡Bienvenido de nuevo {nombre}! 🎉\n\nNos alegra verte otra vez.",
-    "mensaje_despedida": "¡Hasta luego {nombre}! 👋\n\nEsperamos verte pronto.",
+    "mensaje_reingreso": "¡Bienvenido de nuevo {NAME}! 🎉\n\nNos alegra verte otra vez.",
+    "mensaje_despedida": "¡Hasta luego {NAME}! 👋\n\nEsperamos verte pronto.",
     "botones_bienvenida": [],
     "botones_despedida": [],
     "botones_repetidos": [],
@@ -38,13 +38,14 @@ config_default = {
     "media_reingreso": None,
     "media_despedida": None,
     "mensajes_programados": [],
-    "formato_texto": "markdown",
+    "formato_texto": "html",
     "auto_aprobar": True,
     "tiempo_aprobacion": 0,
     "borrar_mensajes_pv": True,
     "proteger_mensajes": True,
     "tiempo_borrado_pv": 60,
-    "tiempo_eliminacion_bienvenida": 0
+    "tiempo_eliminacion_bienvenida": 0,
+    "fijar_mensaje": False
 }
 
 # ==================== FUNCIONES DE CARGA ====================
@@ -71,6 +72,233 @@ def guardar_registro(registro):
     with open(ARCHIVO_REGISTRO, "w") as f:
         json.dump(registro, f, indent=4)
 
+# ==================== VARIABLES PARA MENSAJES ====================
+def obtener_variables(user, chat=None, grupo_config=None):
+    variables = {
+        "{ID}": str(user.id),
+        "{NAME}": user.first_name or "",
+        "{SURNAME}": user.last_name or "",
+        "{NAMESURNAME}": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+        "{USERNAME}": f"@{user.username}" if user.username else "",
+        "{MENTION}": f'<a href="tg://user?id={user.id}">{user.first_name or "Usuario"}</a>',
+        "{LANG}": user.language_code or "es",
+        "{DATE}": datetime.now().strftime("%d/%m/%Y"),
+        "{TIME}": datetime.now().strftime("%H:%M"),
+        "{WEEKDAY}": datetime.now().strftime("%A"),
+    }
+    
+    if chat:
+        variables["{GROUPNAME}"] = chat.title or ""
+        try:
+            variables["{COUNT}"] = str(chat.get_members_count() if hasattr(chat, 'get_members_count') else 0)
+        except:
+            variables["{COUNT}"] = "0"
+    
+    if grupo_config:
+        variables["{RULES}"] = grupo_config.get('reglas', '')
+    
+    return variables
+
+# ==================== PROCESAR MENSAJE CON VARIABLES ====================
+def procesar_mensaje(texto, variables):
+    for key, value in variables.items():
+        texto = texto.replace(key, str(value))
+    return texto
+
+# ==================== PROCESAR BOTONES ====================
+def procesar_botones(texto_botones, grupo_id=None):
+    """
+    Procesa el formato de botones:
+    - Título - t.me/LinkEjemplo
+    - Título - popup:Texto
+    - Título - alert:Texto
+    - Título - rules
+    - Título - share:Texto
+    - Título - copy:Texto
+    """
+    if not texto_botones:
+        return []
+    
+    botones = []
+    lineas = texto_botones.strip().split('\n')
+    
+    for linea in lineas:
+        if not linea.strip():
+            continue
+        
+        # Separar título y acción
+        if ' - ' in linea:
+            partes = linea.split(' - ', 1)
+            titulo = partes[0].strip()
+            accion = partes[1].strip()
+        else:
+            continue
+        
+        # Determinar tipo de botón
+        if accion.startswith('popup:') or accion.startswith('alert:'):
+            texto_popup = accion.replace('popup:', '').replace('alert:', '')
+            botones.append({
+                "tipo": "alert",
+                "texto": titulo,
+                "alert_text": texto_popup
+            })
+        
+        elif accion == 'rules':
+            botones.append({
+                "tipo": "url",
+                "texto": titulo,
+                "url": "https://t.me/"
+            })
+        
+        elif accion.startswith('share:'):
+            texto_share = accion.replace('share:', '')
+            botones.append({
+                "tipo": "share",
+                "texto": titulo,
+                "share_text": texto_share
+            })
+        
+        elif accion.startswith('copy:'):
+            texto_copy = accion.replace('copy:', '')
+            botones.append({
+                "tipo": "copy",
+                "texto": titulo,
+                "copy_text": texto_copy
+            })
+        
+        elif accion.startswith('t.me/') or accion.startswith('https://'):
+            if not accion.startswith('http'):
+                accion = 'https://' + accion
+            botones.append({
+                "tipo": "url",
+                "texto": titulo,
+                "url": accion
+            })
+        
+        else:
+            # Si no coincide con nada, es URL
+            botones.append({
+                "tipo": "url",
+                "texto": titulo,
+                "url": accion
+            })
+    
+    return botones
+
+# ==================== CREAR BOTONES ====================
+def crear_botones(botones_config, share_estado=None, user_id=None):
+    if not botones_config:
+        return None
+    
+    keyboard = []
+    fila = []
+    
+    for b in botones_config:
+        tipo = b.get('tipo', 'url')
+        
+        if tipo == 'url':
+            fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
+        
+        elif tipo == 'share':
+            texto_share = b.get('share_text', '¡Mira este grupo!')
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                switch_inline_query=texto_share
+            ))
+        
+        elif tipo == 'alert':
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                callback_data=f"alert_{b.get('alert_text', '¡Mensaje!')}"
+            ))
+        
+        elif tipo == 'copy':
+            fila.append(InlineKeyboardButton(
+                b['texto'], 
+                callback_data=f"copy_{b.get('copy_text', 'Texto copiado')}"
+            ))
+        
+        elif tipo == 'share_contador':
+            # Botón SHARE especial con contador
+            if user_id and share_estado and str(user_id) in share_estado:
+                estado = share_estado[str(user_id)]
+                paso = estado.get('paso', 0)
+                maximo = estado.get('maximo', 2)
+                
+                if paso >= maximo:
+                    texto_boton = "✅ ACCESO CONCEDIDO"
+                else:
+                    texto_boton = f"📤 {b['texto']} ({paso}/{maximo})"
+                
+                fila.append(InlineKeyboardButton(
+                    texto_boton,
+                    callback_data=f"share_click"
+                ))
+            else:
+                fila.append(InlineKeyboardButton(
+                    f"📤 {b['texto']} (0/2)",
+                    callback_data=f"share_click"
+                ))
+        
+        if len(fila) >= 2:
+            keyboard.append(fila)
+            fila = []
+    
+    if fila:
+        keyboard.append(fila)
+    
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+# ==================== SISTEMA DE SHARE ====================
+share_estado = {}  # {user_id: {"paso": 0, "maximo": 2, "mensaje_id": None, "chat_id": None}}
+
+async def share_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = str(update.effective_user.id)
+    
+    if user_id not in share_estado:
+        share_estado[user_id] = {"paso": 0, "maximo": 2, "mensaje_id": None, "chat_id": None}
+    
+    estado = share_estado[user_id]
+    
+    # Si ya completó
+    if estado["paso"] >= estado["maximo"]:
+        await query.answer("✅ Ya completaste el progreso!", show_alert=True)
+        return
+    
+    # Incrementar paso
+    estado["paso"] += 1
+    
+    # Mensajes según el paso
+    if estado["paso"] == 1:
+        texto = (
+            "🎉 *¡FELICIDADES!*\n\n"
+            "Has compartido el enlace *1 vez*.\n\n"
+            "📌 *Progreso:* 1/2\n\n"
+            "Presiona nuevamente *COMPARTIR* para completar el proceso."
+        )
+        await query.answer("✅ ¡Has compartido 1 vez!", show_alert=True)
+    
+    elif estado["paso"] >= estado["maximo"]:
+        texto = (
+            "🎉 *¡ACCESO CONCEDIDO!*\n\n"
+            "Has completado el proceso de *2/2*.\n"
+            "Ahora puedes acceder al grupo.\n\n"
+            "🔗 *[Haz clic aquí para unirte](https://t.me/+tu_enlace_aqui)*"
+        )
+        await query.answer("🎉 ¡Completaste 2/2!", show_alert=True)
+    
+    # Editar el mensaje
+    try:
+        await query.edit_message_text(
+            texto,
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+
 # ==================== OBTENER CONFIG DEL GRUPO ====================
 def get_grupo_config(grupo_id):
     config = cargar_config()
@@ -91,7 +319,9 @@ def get_grupo_config(grupo_id):
             "tiempo_aprobacion": 0,
             "mensajes_programados": [],
             "tiempo_eliminacion_bienvenida": 0,
-            "mensajes_activos": {}
+            "mensajes_activos": {},
+            "fijar_mensaje": False,
+            "reglas": ""
         }
         guardar_config(config)
     
@@ -101,75 +331,6 @@ def guardar_grupo_config(grupo_id, grupo_config):
     config = cargar_config()
     config['grupos'][str(grupo_id)] = grupo_config
     guardar_config(config)
-
-# ==================== CREAR BOTONES ====================
-def crear_botones(botones_config):
-    if not botones_config:
-        return None
-    
-    keyboard = []
-    fila = []
-    
-    for b in botones_config:
-        tipo = b.get('tipo', 'url')
-        
-        if tipo == 'url':
-            fila.append(InlineKeyboardButton(b['texto'], url=b['url']))
-        elif tipo == 'share':
-            fila.append(InlineKeyboardButton(b['texto'], switch_inline_query="¡Mira este grupo!"))
-        elif tipo == 'alert':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"alert_{b.get('alert_text', '¡Mensaje!')}"))
-        elif tipo == 'edit':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"edit_{b.get('edit_text', 'Editado')}"))
-        elif tipo == 'delete':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data="delete_msg"))
-        elif tipo == 'callback':
-            fila.append(InlineKeyboardButton(b['texto'], callback_data=f"custom_{b.get('callback_data', 'accion')}"))
-        
-        if len(fila) >= 2:
-            keyboard.append(fila)
-            fila = []
-    
-    if fila:
-        keyboard.append(fila)
-    
-    return InlineKeyboardMarkup(keyboard) if keyboard else None
-
-# ==================== SISTEMA DE SHARE ====================
-share_estado = {}
-
-async def share_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
-    
-    if user_id not in share_estado:
-        share_estado[user_id] = {"paso": 0}
-    
-    estado = share_estado[user_id]
-    
-    if estado["paso"] == 0:
-        estado["paso"] = 1
-        await query.edit_message_text(
-            "🎉 *¡FELICIDADES!*\n\n"
-            "Has compartido el enlace *1 vez*.\n\n"
-            "📌 *Progreso:* 1/2\n\n"
-            "Presiona nuevamente *COMPARTIR* para completar el proceso.",
-            parse_mode="Markdown"
-        )
-        await query.answer("✅ ¡Has compartido 1 vez!", show_alert=True)
-    
-    elif estado["paso"] == 1:
-        estado["paso"] = 2
-        await query.edit_message_text(
-            "🎉 *¡ACCESO CONCEDIDO!*\n\n"
-            "Has completado el proceso de *2/2*.\n"
-            "Ahora puedes acceder al grupo.\n\n"
-            "🔗 *[Haz clic aquí para unirte](https://t.me/+tu_enlace_aqui)*",
-            parse_mode="Markdown"
-        )
-        await query.answer("🎉 ¡Completaste 2/2!", show_alert=True)
 
 # ==================== COMANDO START ====================
 async def start(update, context):
@@ -231,7 +392,9 @@ async def menu_principal(update, context, edit=False, grupo_id=None):
         [InlineKeyboardButton("🔘 Botones Bienvenida", callback_data=f"menu_botones_bienvenida_{grupo_id}")],
         [InlineKeyboardButton("🔘 Botones Despedida", callback_data=f"menu_botones_despedida_{grupo_id}")],
         [InlineKeyboardButton("🔘 Botones Repetidos", callback_data=f"menu_botones_repetidos_{grupo_id}")],
+        [InlineKeyboardButton("📋 Reglas del Grupo", callback_data=f"menu_reglas_{grupo_id}")],
         [InlineKeyboardButton("🖼️ Media", callback_data=f"menu_media_{grupo_id}")],
+        [InlineKeyboardButton("📌 Fijar Mensaje", callback_data=f"menu_fijar_{grupo_id}")],
         [InlineKeyboardButton("⏰ Eliminar Bienvenida", callback_data=f"menu_eliminar_{grupo_id}")],
         [InlineKeyboardButton("✅ Auto-Aprobación", callback_data=f"menu_auto_{grupo_id}")],
         [InlineKeyboardButton("⏰ Tiempo Aprobación", callback_data=f"menu_tiempo_{grupo_id}")],
@@ -250,7 +413,8 @@ async def menu_principal(update, context, edit=False, grupo_id=None):
         f"📌 Grupo ID: `{grupo_id}`\n"
         f"✅ Auto-Aprobación: {'ON' if grupo_config.get('auto_aprobar', True) else 'OFF'}\n"
         f"⏰ Tiempo: {grupo_config.get('tiempo_aprobacion', 0)}s\n"
-        f"🗑️ Eliminar bienvenida: {grupo_config.get('tiempo_eliminacion_bienvenida', 0)}s\n\n"
+        f"🗑️ Eliminar bienvenida: {grupo_config.get('tiempo_eliminacion_bienvenida', 0)}s\n"
+        f"📌 Fijar mensaje: {'✅' if grupo_config.get('fijar_mensaje', False) else '❌'}\n\n"
         f"Selecciona una opción:"
     )
     
@@ -283,6 +447,11 @@ async def menu_callback(update, context):
     if data.startswith("alert_"):
         alert_text = data.replace('alert_', '')
         await query.answer(alert_text, show_alert=True)
+        return
+    
+    if data.startswith("copy_"):
+        copy_text = data.replace('copy_', '')
+        await query.answer(f"📋 Texto copiado:\n{copy_text}", show_alert=True)
         return
     
     if data.startswith("edit_"):
@@ -330,6 +499,58 @@ async def menu_callback(update, context):
     grupo_config = get_grupo_config(grupo_id)
     config = cargar_config()
     
+    # ========== REGLAS ==========
+    if data.startswith("menu_reglas_"):
+        await query.edit_message_text(
+            "📋 *Configurar Reglas del Grupo*\n\n"
+            "Envía el texto de las reglas.\n\n"
+            "Variables disponibles:\n"
+            "• `{NAME}` - Nombre del usuario\n"
+            "• `{MENTION}` - Mención al usuario\n"
+            "• `{GROUPNAME}` - Nombre del grupo\n\n"
+            "Ejemplo:\n"
+            "`Reglas del grupo {GROUPNAME}:`\n\n"
+            "Para cancelar: /cancelar",
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando'] = 'reglas'
+        context.user_data['grupo_id'] = grupo_id
+        return
+    
+    # ========== FIJAR MENSAJE ==========
+    if data.startswith("menu_fijar_"):
+        fijar = grupo_config.get('fijar_mensaje', False)
+        keyboard = [
+            [InlineKeyboardButton("✅ Activar" if not fijar else "✅ Ya Activado", callback_data=f"fijar_on_{grupo_id}")],
+            [InlineKeyboardButton("❌ Desactivar" if fijar else "❌ Ya Desactivado", callback_data=f"fijar_off_{grupo_id}")],
+            [InlineKeyboardButton("🔙 Atrás", callback_data=f"menu_back_{grupo_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        estado = "✅ Activado" if fijar else "❌ Desactivado"
+        await query.edit_message_text(
+            f"📌 *FIJAR MENSAJE*\n\n"
+            f"*Estado:* {estado}\n\n"
+            f"Cuando está activado, el mensaje de bienvenida se fija en el chat del usuario.",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        return
+    
+    if data.startswith("fijar_on_"):
+        grupo_config['fijar_mensaje'] = True
+        guardar_grupo_config(grupo_id, grupo_config)
+        await query.edit_message_text("✅ Fijar mensaje ACTIVADO")
+        await menu_principal(update, context, edit=True, grupo_id=grupo_id)
+        return
+    
+    if data.startswith("fijar_off_"):
+        grupo_config['fijar_mensaje'] = False
+        guardar_grupo_config(grupo_id, grupo_config)
+        await query.edit_message_text("❌ Fijar mensaje DESACTIVADO")
+        await menu_principal(update, context, edit=True, grupo_id=grupo_id)
+        return
+    
     # ========== MENSAJES ==========
     if data.startswith("menu_welcome_"):
         keyboard = [
@@ -348,7 +569,25 @@ async def menu_callback(update, context):
     
     if data.startswith("welcome_edit_"):
         await query.edit_message_text(
-            "✏️ Envía el mensaje de bienvenida.\n\nVariables disponibles:\n• `{nombre}`\n• `{mention}`\n• `{perfil}`\n• `{id}`\n\nPara cancelar: /cancelar",
+            "✏️ *Editar Mensaje de Bienvenida*\n\n"
+            "Envía el mensaje de bienvenida.\n\n"
+            "Variables disponibles:\n"
+            "• `{ID}` - ID del usuario\n"
+            "• `{NAME}` - Nombre del usuario\n"
+            "• `{SURNAME}` - Apellido del usuario\n"
+            "• `{NAMESURNAME}` - Nombre y apellido\n"
+            "• `{USERNAME}` - @username\n"
+            "• `{MENTION}` - Mención al usuario\n"
+            "• `{LANG}` - Idioma del usuario\n"
+            "• `{DATE}` - Fecha actual\n"
+            "• `{TIME}` - Hora actual\n"
+            "• `{WEEKDAY}` - Día de la semana\n"
+            "• `{GROUPNAME}` - Nombre del grupo\n"
+            "• `{RULES}` - Reglas del grupo\n"
+            "• `{COUNT}` - Número de miembros\n\n"
+            "Ejemplo:\n"
+            "`¡Bienvenido {MENTION}!`\n\n"
+            "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
         context.user_data['esperando'] = 'welcome'
@@ -357,7 +596,22 @@ async def menu_callback(update, context):
     
     if data.startswith("reingreso_edit_"):
         await query.edit_message_text(
-            "✏️ Envía el mensaje de reingreso.\n\nVariables disponibles:\n• `{nombre}`\n• `{mention}`\n• `{perfil}`\n\nPara cancelar: /cancelar",
+            "✏️ *Editar Mensaje de Reingreso*\n\n"
+            "Envía el mensaje de reingreso.\n\n"
+            "Variables disponibles:\n"
+            "• `{ID}` - ID del usuario\n"
+            "• `{NAME}` - Nombre del usuario\n"
+            "• `{SURNAME}` - Apellido del usuario\n"
+            "• `{NAMESURNAME}` - Nombre y apellido\n"
+            "• `{USERNAME}` - @username\n"
+            "• `{MENTION}` - Mención al usuario\n"
+            "• `{DATE}` - Fecha actual\n"
+            "• `{TIME}` - Hora actual\n"
+            "• `{WEEKDAY}` - Día de la semana\n"
+            "• `{GROUPNAME}` - Nombre del grupo\n\n"
+            "Ejemplo:\n"
+            "`¡Bienvenido de nuevo {MENTION}!`\n\n"
+            "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
         context.user_data['esperando'] = 'reingreso'
@@ -366,10 +620,92 @@ async def menu_callback(update, context):
     
     if data.startswith("menu_goodbye_"):
         await query.edit_message_text(
-            "✏️ Envía el mensaje de despedida.\n\nVariables disponibles:\n• `{nombre}`\n• `{mention}`\n• `{perfil}`\n\nPara cancelar: /cancelar",
+            "✏️ *Editar Mensaje de Despedida*\n\n"
+            "Envía el mensaje de despedida.\n\n"
+            "Variables disponibles:\n"
+            "• `{ID}` - ID del usuario\n"
+            "• `{NAME}` - Nombre del usuario\n"
+            "• `{SURNAME}` - Apellido del usuario\n"
+            "• `{NAMESURNAME}` - Nombre y apellido\n"
+            "• `{USERNAME}` - @username\n"
+            "• `{MENTION}` - Mención al usuario\n"
+            "• `{DATE}` - Fecha actual\n"
+            "• `{TIME}` - Hora actual\n"
+            "• `{WEEKDAY}` - Día de la semana\n"
+            "• `{GROUPNAME}` - Nombre del grupo\n\n"
+            "Ejemplo:\n"
+            "`¡Hasta luego {MENTION}!`\n\n"
+            "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
         context.user_data['esperando'] = 'despedida'
+        context.user_data['grupo_id'] = grupo_id
+        return
+    
+    # ========== BOTONES ==========
+    if data.startswith("menu_botones_bienvenida_"):
+        await mostrar_botones_menu(update, context, grupo_id, "bienvenida")
+        return
+    
+    if data.startswith("menu_botones_despedida_"):
+        await mostrar_botones_menu(update, context, grupo_id, "despedida")
+        return
+    
+    if data.startswith("menu_botones_repetidos_"):
+        await mostrar_botones_menu(update, context, grupo_id, "repetidos")
+        return
+    
+    # ========== AGREGAR BOTONES ==========
+    if data.startswith("btn_bienvenida_") or data.startswith("btn_despedida_") or data.startswith("btn_repetidos_"):
+        parts = data.split('_')
+        tipo_lista = parts[1]
+        accion = parts[2]
+        
+        if accion == 'clear':
+            if tipo_lista == "bienvenida":
+                grupo_config['botones_bienvenida'] = []
+            elif tipo_lista == "despedida":
+                grupo_config['botones_despedida'] = []
+            else:
+                grupo_config['botones_repetidos'] = []
+            guardar_grupo_config(grupo_id, grupo_config)
+            await query.edit_message_text(f"✅ Botones eliminados")
+            await mostrar_botones_menu(update, context, grupo_id, tipo_lista)
+            return
+        
+        if accion == 'share_contador':
+            # Botón SHARE especial
+            await query.edit_message_text(
+                "📊 *Agregar Botón SHARE 0/2*\n\n"
+                "El botón mostrará un contador progresivo.\n"
+                "Envía el TEXTO del botón:\n"
+                "`Compartir para acceder`\n\n"
+                "Formato:\n"
+                "1. Usuario presiona → 'Felicidades (1/2)'\n"
+                "2. Usuario presiona → 'Felicidades (2/2)'\n"
+                "3. Aparece 'Acceso Concedido'\n\n"
+                "Para cancelar: /cancelar",
+                parse_mode="Markdown"
+            )
+            context.user_data['esperando'] = f"btn_{tipo_lista}_share_contador"
+            context.user_data['grupo_id'] = grupo_id
+            return
+        
+        await query.edit_message_text(
+            "✏️ *Agregar Botón*\n\n"
+            "Formato:\n"
+            "• URL: `Título - t.me/Link`\n"
+            "• Popup: `Título - popup:Texto`\n"
+            "• Alert: `Título - alert:Texto`\n"
+            "• Reglas: `Título - rules`\n"
+            "• Share: `Título - share:Texto`\n"
+            "• Copy: `Título - copy:Texto`\n\n"
+            "Ejemplo:\n"
+            "`📢 Canal - t.me/mi_canal`\n\n"
+            "Para cancelar: /cancelar",
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando'] = f"btn_{tipo_lista}_{accion}"
         context.user_data['grupo_id'] = grupo_id
         return
     
@@ -432,44 +768,6 @@ async def menu_callback(update, context):
         guardar_grupo_config(grupo_id, grupo_config)
         await query.edit_message_text("✅ Media de despedida eliminada")
         await menu_principal(update, context, edit=True, grupo_id=grupo_id)
-        return
-    
-    # ========== BOTONES ==========
-    if data.startswith("menu_botones_bienvenida_"):
-        await mostrar_botones_menu(update, context, grupo_id, "bienvenida")
-        return
-    
-    if data.startswith("menu_botones_despedida_"):
-        await mostrar_botones_menu(update, context, grupo_id, "despedida")
-        return
-    
-    if data.startswith("menu_botones_repetidos_"):
-        await mostrar_botones_menu(update, context, grupo_id, "repetidos")
-        return
-    
-    # ========== AGREGAR BOTONES ==========
-    if data.startswith("btn_bienvenida_") or data.startswith("btn_despedida_") or data.startswith("btn_repetidos_"):
-        parts = data.split('_')
-        tipo_lista = parts[1]
-        accion = parts[2]
-        
-        if accion == 'clear':
-            if tipo_lista == "bienvenida":
-                grupo_config['botones_bienvenida'] = []
-            elif tipo_lista == "despedida":
-                grupo_config['botones_despedida'] = []
-            else:
-                grupo_config['botones_repetidos'] = []
-            guardar_grupo_config(grupo_id, grupo_config)
-            await query.edit_message_text(f"✅ Botones eliminados")
-            await mostrar_botones_menu(update, context, grupo_id, tipo_lista)
-            return
-        
-        await query.edit_message_text(
-            f"✏️ Envía el botón en el formato correspondiente.\n\nPara cancelar: /cancelar"
-        )
-        context.user_data['esperando'] = f"btn_{tipo_lista}_{accion}"
-        context.user_data['grupo_id'] = grupo_id
         return
     
     # ========== ELIMINAR BIENVENIDA ==========
@@ -559,10 +857,88 @@ async def menu_callback(update, context):
     
     # ========== MENSAJES PROGRAMADOS ==========
     if data.startswith("menu_mensajes_"):
+        keyboard = [
+            [InlineKeyboardButton("➕ Agregar Mensaje", callback_data=f"addmsg_{grupo_id}")],
+            [InlineKeyboardButton("➕ Agregar con Media", callback_data=f"addmedia_{grupo_id}")],
+            [InlineKeyboardButton("🗑️ Eliminar Mensaje", callback_data=f"delmsg_{grupo_id}")],
+            [InlineKeyboardButton("📋 Listar Mensajes", callback_data=f"listmsg_{grupo_id}")],
+            [InlineKeyboardButton("🔙 Atrás", callback_data=f"menu_back_{grupo_id}")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        mensajes = grupo_config.get('mensajes_programados', [])
+        
+        texto = f"📨 *MENSAJES PROGRAMADOS*\n\n"
+        if mensajes:
+            for i, msg in enumerate(mensajes, 1):
+                seg = msg.get('intervalo', 3600)
+                texto += f"{i}. Cada {seg/60:.0f}min: {msg.get('mensaje', '')[:30]}...\n"
+        else:
+            texto += "No hay mensajes programados.\n"
+        
         await query.edit_message_text(
-            "📨 *MENSAJES PROGRAMADOS*\n\nComandos en el grupo:\n/addmsg `segundos|mensaje`\n/addmedia `segundos`\n/removemsg `número`\n/listmsg\n\nEjemplo: `/addmsg 120|¡Hola {nombre}!`",
+            texto,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+        return
+    
+    if data.startswith("addmsg_"):
+        await query.edit_message_text(
+            "📨 *Agregar Mensaje Programado*\n\n"
+            "Envía en formato:\n"
+            "`segundos|mensaje`\n\n"
+            "Ejemplo:\n"
+            "`120|¡Hola {NAME}! Recuerda participar!`\n\n"
+            "Mínimo 60 segundos (1 minuto)\n\n"
+            "Para cancelar: /cancelar",
             parse_mode="Markdown"
         )
+        context.user_data['esperando'] = 'addmsg'
+        context.user_data['grupo_id'] = grupo_id
+        return
+    
+    if data.startswith("addmedia_"):
+        await query.edit_message_text(
+            "📨 *Agregar Mensaje con Media*\n\n"
+            "Envía en formato:\n"
+            "`segundos`\n\n"
+            "Luego envía la foto o video.\n\n"
+            "Ejemplo:\n"
+            "`120`\n\n"
+            "Mínimo 60 segundos (1 minuto)\n\n"
+            "Para cancelar: /cancelar",
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando'] = 'addmedia'
+        context.user_data['grupo_id'] = grupo_id
+        return
+    
+    if data.startswith("delmsg_"):
+        await query.edit_message_text(
+            "🗑️ *Eliminar Mensaje Programado*\n\n"
+            "Envía el número del mensaje a eliminar:\n"
+            "`1`\n\n"
+            "Para cancelar: /cancelar",
+            parse_mode="Markdown"
+        )
+        context.user_data['esperando'] = 'delmsg'
+        context.user_data['grupo_id'] = grupo_id
+        return
+    
+    if data.startswith("listmsg_"):
+        mensajes = grupo_config.get('mensajes_programados', [])
+        if not mensajes:
+            await query.edit_message_text("📨 No hay mensajes programados.")
+            return
+        
+        texto = "📨 *Mensajes Programados:*\n\n"
+        for i, msg in enumerate(mensajes, 1):
+            seg = msg.get('intervalo', 3600)
+            texto += f"{i}. Cada {seg/60:.0f}min: {msg.get('mensaje', '')[:30]}...\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data=f"menu_mensajes_{grupo_id}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(texto, parse_mode="Markdown", reply_markup=reply_markup)
         return
     
     # ========== PROTECCIÓN ==========
@@ -649,7 +1025,8 @@ async def menu_callback(update, context):
             f"🔘 Botones Despedida: {len(grupo_config.get('botones_despedida', []))}\n"
             f"🔘 Botones Repetidos: {len(grupo_config.get('botones_repetidos', []))}\n"
             f"📨 Programados: {len(grupo_config.get('mensajes_programados', []))}\n"
-            f"🖼️ Media: {'✅' if grupo_config.get('media_bienvenida') else '❌'}"
+            f"🖼️ Media: {'✅' if grupo_config.get('media_bienvenida') else '❌'}\n"
+            f"📌 Fijar mensaje: {'✅' if grupo_config.get('fijar_mensaje', False) else '❌'}"
         )
         keyboard = [[InlineKeyboardButton("🔙 Atrás", callback_data=f"menu_back_{grupo_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -686,7 +1063,9 @@ async def menu_callback(update, context):
             "tiempo_aprobacion": 0,
             "mensajes_programados": [],
             "tiempo_eliminacion_bienvenida": 0,
-            "mensajes_activos": {}
+            "mensajes_activos": {},
+            "fijar_mensaje": False,
+            "reglas": ""
         }
         guardar_config(config)
         await query.edit_message_text(f"✅ Grupo {grupo_id} reseteado")
@@ -717,7 +1096,7 @@ async def mostrar_botones_menu(update, context, grupo_id, tipo):
     if botones:
         for i, b in enumerate(botones, 1):
             tipo_btn = b.get('tipo', 'url')
-            emoji = {'url': '🔗', 'share': '📤', 'alert': '⚠️', 'edit': '✏️', 'delete': '🗑️', 'callback': '⚡'}.get(tipo_btn, '📌')
+            emoji = {'url': '🔗', 'share': '📤', 'alert': '⚠️', 'edit': '✏️', 'delete': '🗑️', 'callback': '⚡', 'copy': '📋', 'share_contador': '📊'}.get(tipo_btn, '📌')
             texto += f"{i}. {emoji} {b['texto']} ({tipo_btn})\n"
     else:
         texto += "No hay botones configurados.\n"
@@ -725,9 +1104,11 @@ async def mostrar_botones_menu(update, context, grupo_id, tipo):
     keyboard = [
         [InlineKeyboardButton("➕ URL", callback_data=f"btn_{tipo}_url_{grupo_id}")],
         [InlineKeyboardButton("📤 Share", callback_data=f"btn_{tipo}_share_{grupo_id}")],
-        [InlineKeyboardButton("⚠️ Alert", callback_data=f"btn_{tipo}_alert_{grupo_id}")],
+        [InlineKeyboardButton("📊 SHARE 0/2", callback_data=f"btn_{tipo}_share_contador_{grupo_id}")],
+        [InlineKeyboardButton("⚠️ Alert/Popup", callback_data=f"btn_{tipo}_alert_{grupo_id}")],
         [InlineKeyboardButton("✏️ Edit", callback_data=f"btn_{tipo}_edit_{grupo_id}")],
         [InlineKeyboardButton("🗑️ Delete", callback_data=f"btn_{tipo}_delete_{grupo_id}")],
+        [InlineKeyboardButton("📋 Copy", callback_data=f"btn_{tipo}_copy_{grupo_id}")],
         [InlineKeyboardButton("⚡ Custom", callback_data=f"btn_{tipo}_custom_{grupo_id}")],
         [InlineKeyboardButton("⬆️ Mover Arriba", callback_data=f"btn_{tipo}_up_{grupo_id}")],
         [InlineKeyboardButton("⬇️ Mover Abajo", callback_data=f"btn_{tipo}_down_{grupo_id}")],
@@ -744,33 +1125,46 @@ async def preview_grupo(update, context, grupo_id):
     mensaje = grupo_config.get('mensaje_bienvenida', 'No configurado')
     botones = grupo_config.get('botones_bienvenida', [])
     media = grupo_config.get('media_bienvenida')
-    formato = cargar_config().get('formato_texto', 'markdown')
+    formato = cargar_config().get('formato_texto', 'html')
     
-    mensaje_prueba = mensaje.replace('{nombre}', 'Usuario')
-    mensaje_prueba = mensaje_prueba.replace('{mention}', '@usuario')
-    mensaje_prueba = mensaje_prueba.replace('{perfil}', '[Perfil](tg://user?id=123456789)')
+    variables = {
+        "{ID}": "123456789",
+        "{NAME}": "Usuario",
+        "{SURNAME}": "Prueba",
+        "{NAMESURNAME}": "Usuario Prueba",
+        "{USERNAME}": "@usuario",
+        "{MENTION}": '<a href="tg://user?id=123456789">Usuario</a>',
+        "{LANG}": "es",
+        "{DATE}": datetime.now().strftime("%d/%m/%Y"),
+        "{TIME}": datetime.now().strftime("%H:%M"),
+        "{WEEKDAY}": datetime.now().strftime("%A"),
+        "{GROUPNAME}": "Grupo de Prueba",
+        "{RULES}": "Reglas del grupo",
+        "{COUNT}": "100"
+    }
     
-    reply_markup = crear_botones(botones)
+    mensaje_prueba = procesar_mensaje(mensaje, variables)
+    reply_markup = crear_botones(botones, share_estado, update.effective_user.id)
     
     if media and media.get('file_id'):
         if media.get('tipo') == 'foto':
             await update.callback_query.message.reply_photo(
                 photo=media.get('file_id'),
                 caption=f"👁️ *Vista previa:*\n\n{mensaje_prueba}",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=reply_markup
             )
         elif media.get('tipo') == 'video':
             await update.callback_query.message.reply_video(
                 video=media.get('file_id'),
                 caption=f"👁️ *Vista previa:*\n\n{mensaje_prueba}",
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=reply_markup
             )
     else:
         await update.callback_query.message.reply_text(
             f"👁️ *Vista previa:*\n\n{mensaje_prueba}",
-            parse_mode="Markdown",
+            parse_mode="HTML",
             reply_markup=reply_markup
         )
 
@@ -951,6 +1345,7 @@ async def enviar_mensaje_programado(context):
         grupo_id = int(parts[1])
         
         grupo_config = get_grupo_config(grupo_id)
+        config_global = cargar_config()
         
         try:
             chat_members = await context.bot.get_chat_administrators(grupo_id)
@@ -961,6 +1356,12 @@ async def enviar_mensaje_programado(context):
         if not user_ids:
             return
         
+        # Obtener chat para variables
+        try:
+            chat = await context.bot.get_chat(grupo_id)
+        except:
+            chat = None
+        
         for msg_config in grupo_config.get('mensajes_programados', []):
             mensaje = msg_config.get('mensaje', '')
             media = msg_config.get('media')
@@ -970,12 +1371,13 @@ async def enviar_mensaje_programado(context):
                 try:
                     try:
                         user = await context.bot.get_chat(user_id)
-                        nombre = user.first_name or "Usuario"
                     except:
-                        nombre = "Usuario"
+                        continue
                     
-                    texto = mensaje.replace('{nombre}', nombre)
-                    reply_markup = crear_botones(botones)
+                    variables = obtener_variables(user, chat, grupo_config)
+                    texto = procesar_mensaje(mensaje, variables)
+                    
+                    reply_markup = crear_botones(botones, share_estado, user_id)
                     
                     if media and media.get('file_id'):
                         if media.get('tipo') == 'foto':
@@ -983,7 +1385,7 @@ async def enviar_mensaje_programado(context):
                                 chat_id=user_id,
                                 photo=media.get('file_id'),
                                 caption=texto,
-                                parse_mode="Markdown",
+                                parse_mode="HTML",
                                 reply_markup=reply_markup
                             )
                         elif media.get('tipo') == 'video':
@@ -991,14 +1393,14 @@ async def enviar_mensaje_programado(context):
                                 chat_id=user_id,
                                 video=media.get('file_id'),
                                 caption=texto,
-                                parse_mode="Markdown",
+                                parse_mode="HTML",
                                 reply_markup=reply_markup
                             )
                     else:
                         await context.bot.send_message(
                             chat_id=user_id,
                             text=texto,
-                            parse_mode="Markdown",
+                            parse_mode="HTML",
                             reply_markup=reply_markup
                         )
                     
@@ -1043,7 +1445,7 @@ async def handle_join_request(update, context):
         
         es_reingreso = registro['usuarios'][user_id]['veces'] > 1
         
-        await enviar_bienvenida_pv(context, user, grupo_id, es_reingreso)
+        await enviar_bienvenida_pv(context, user, chat, grupo_id, es_reingreso)
         
         auto_aprobar = grupo_config.get('auto_aprobar', True)
         tiempo_aprobacion = grupo_config.get('tiempo_aprobacion', 0)
@@ -1090,12 +1492,12 @@ async def handle_chat_member_update(update, context):
             new_status in ['left', 'kicked']):
             
             await asyncio.sleep(1)
-            await enviar_despedida_pv(context, user, grupo_id)
+            await enviar_despedida_pv(context, user, chat, grupo_id)
             
     except Exception as e:
         logger.error(f"Error en handle_chat_member_update: {str(e)}")
 
-async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
+async def enviar_bienvenida_pv(context, user, chat, grupo_id, es_reingreso=False):
     try:
         grupo_config = get_grupo_config(grupo_id)
         config_global = cargar_config()
@@ -1108,22 +1510,23 @@ async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
             media = grupo_config.get('media_bienvenida')
         
         botones = grupo_config.get('botones_bienvenida', [])
-        formato = config_global.get('formato_texto', 'markdown')
+        formato = config_global.get('formato_texto', 'html')
         proteger = config_global.get('proteger_mensajes', True)
+        fijar = grupo_config.get('fijar_mensaje', False)
         
-        mensaje_personalizado = mensaje.replace('{nombre}', user.first_name)
-        mensaje_personalizado = mensaje_personalizado.replace('{mention}', f'@{user.username}' if user.username else user.first_name)
-        mensaje_personalizado = mensaje_personalizado.replace('{perfil}', f'[Perfil](tg://user?id={user.id})')
+        variables = obtener_variables(user, chat, grupo_config)
+        mensaje_personalizado = procesar_mensaje(mensaje, variables)
         
-        reply_markup = crear_botones(botones)
+        reply_markup = crear_botones(botones, share_estado, user.id)
         
+        # Enviar mensaje
         if media and media.get('file_id'):
             if media.get('tipo') == 'foto':
                 msg = await context.bot.send_photo(
                     chat_id=user.id,
                     photo=media.get('file_id'),
-                    caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                    parse_mode=formato.upper(),
+                    caption=mensaje_personalizado,
+                    parse_mode="HTML",
                     reply_markup=reply_markup,
                     protect_content=proteger
                 )
@@ -1131,20 +1534,32 @@ async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
                 msg = await context.bot.send_video(
                     chat_id=user.id,
                     video=media.get('file_id'),
-                    caption=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                    parse_mode=formato.upper(),
+                    caption=mensaje_personalizado,
+                    parse_mode="HTML",
                     reply_markup=reply_markup,
                     protect_content=proteger
                 )
         else:
             msg = await context.bot.send_message(
                 chat_id=user.id,
-                text=f"👋 ¡Hola {user.first_name}!\n\n{mensaje_personalizado}",
-                parse_mode=formato.upper(),
+                text=mensaje_personalizado,
+                parse_mode="HTML",
                 reply_markup=reply_markup,
                 protect_content=proteger
             )
         
+        # Fijar mensaje
+        if fijar:
+            try:
+                await context.bot.pin_chat_message(
+                    chat_id=user.id,
+                    message_id=msg.message_id
+                )
+                logger.info(f"📌 Mensaje fijado para {user.first_name}")
+            except Exception as e:
+                logger.error(f"Error fijando mensaje: {str(e)}")
+        
+        # Eliminar bienvenida después de tiempo
         tiempo_elim = grupo_config.get('tiempo_eliminacion_bienvenida', 0)
         if tiempo_elim > 0:
             if 'mensajes_activos' not in grupo_config:
@@ -1165,6 +1580,7 @@ async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
             
             asyncio.create_task(eliminar_bienvenida())
         
+        # Borrar mensaje del PV después de tiempo
         if config_global.get('borrar_mensajes_pv', True):
             tiempo = config_global.get('tiempo_borrado_pv', 60)
             if tiempo > 0:
@@ -1183,7 +1599,7 @@ async def enviar_bienvenida_pv(context, user, grupo_id, es_reingreso=False):
         logger.error(f"Error enviando bienvenida: {str(e)}")
         return None
 
-async def enviar_despedida_pv(context, user, grupo_id):
+async def enviar_despedida_pv(context, user, chat, grupo_id):
     try:
         grupo_config = get_grupo_config(grupo_id)
         config_global = cargar_config()
@@ -1191,14 +1607,13 @@ async def enviar_despedida_pv(context, user, grupo_id):
         mensaje = grupo_config.get('mensaje_despedida', config_default['mensaje_despedida'])
         media = grupo_config.get('media_despedida')
         botones = grupo_config.get('botones_despedida', [])
-        formato = config_global.get('formato_texto', 'markdown')
+        formato = config_global.get('formato_texto', 'html')
         proteger = config_global.get('proteger_mensajes', True)
         
-        mensaje_personalizado = mensaje.replace('{nombre}', user.first_name)
-        mensaje_personalizado = mensaje_personalizado.replace('{mention}', f'@{user.username}' if user.username else user.first_name)
-        mensaje_personalizado = mensaje_personalizado.replace('{perfil}', f'[Perfil](tg://user?id={user.id})')
+        variables = obtener_variables(user, chat, grupo_config)
+        mensaje_personalizado = procesar_mensaje(mensaje, variables)
         
-        reply_markup = crear_botones(botones)
+        reply_markup = crear_botones(botones, share_estado, user.id)
         
         if media and media.get('file_id'):
             if media.get('tipo') == 'foto':
@@ -1206,7 +1621,7 @@ async def enviar_despedida_pv(context, user, grupo_id):
                     chat_id=user.id,
                     photo=media.get('file_id'),
                     caption=f"👋 ¡Hasta luego {user.first_name}!\n\n{mensaje_personalizado}",
-                    parse_mode=formato.upper(),
+                    parse_mode="HTML",
                     reply_markup=reply_markup,
                     protect_content=proteger
                 )
@@ -1215,7 +1630,7 @@ async def enviar_despedida_pv(context, user, grupo_id):
                     chat_id=user.id,
                     video=media.get('file_id'),
                     caption=f"👋 ¡Hasta luego {user.first_name}!\n\n{mensaje_personalizado}",
-                    parse_mode=formato.upper(),
+                    parse_mode="HTML",
                     reply_markup=reply_markup,
                     protect_content=proteger
                 )
@@ -1223,7 +1638,7 @@ async def enviar_despedida_pv(context, user, grupo_id):
             msg = await context.bot.send_message(
                 chat_id=user.id,
                 text=f"👋 ¡Hasta luego {user.first_name}!\n\n{mensaje_personalizado}",
-                parse_mode=formato.upper(),
+                parse_mode="HTML",
                 reply_markup=reply_markup,
                 protect_content=proteger
             )
@@ -1258,7 +1673,18 @@ async def handle_config(update, context):
         return
     
     grupo_config = get_grupo_config(grupo_id)
+    config_global = cargar_config()
     
+    # ========== REGLAS ==========
+    if estado == 'reglas':
+        grupo_config['reglas'] = update.message.text
+        guardar_grupo_config(grupo_id, grupo_config)
+        await update.message.reply_text("✅ Reglas guardadas correctamente.")
+        context.user_data.clear()
+        await menu_principal(update, context, grupo_id=grupo_id)
+        return
+    
+    # ========== MENSAJES ==========
     if estado == 'welcome':
         grupo_config['mensaje_bienvenida'] = update.message.text
         guardar_grupo_config(grupo_id, grupo_config)
@@ -1283,6 +1709,138 @@ async def handle_config(update, context):
         await menu_principal(update, context, grupo_id=grupo_id)
         return
     
+    # ========== MENSAJES PROGRAMADOS ==========
+    if estado == 'addmsg':
+        try:
+            partes = update.message.text.split('|', 1)
+            if len(partes) != 2:
+                await update.message.reply_text("❌ Formato: `segundos|mensaje`")
+                return
+            
+            segundos = float(partes[0])
+            if segundos < 60:
+                await update.message.reply_text("⚠️ Mínimo 60 segundos")
+                return
+            
+            mensaje = partes[1]
+            
+            if 'mensajes_programados' not in grupo_config:
+                grupo_config['mensajes_programados'] = []
+            
+            grupo_config['mensajes_programados'].append({
+                "intervalo": segundos,
+                "mensaje": mensaje,
+                "media": None
+            })
+            guardar_grupo_config(grupo_id, grupo_config)
+            
+            if context.application.job_queue:
+                context.application.job_queue.run_repeating(
+                    enviar_mensaje_programado,
+                    interval=segundos,
+                    first=5,
+                    name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
+                    chat_id=grupo_id,
+                    user_id=grupo_id
+                )
+            
+            await update.message.reply_text(f"✅ Mensaje programado cada {segundos/60:.0f} minutos")
+            context.user_data.clear()
+            await menu_principal(update, context, grupo_id=grupo_id)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+        return
+    
+    if estado == 'addmedia':
+        try:
+            segundos = float(update.message.text)
+            if segundos < 60:
+                await update.message.reply_text("⚠️ Mínimo 60 segundos")
+                return
+            
+            context.user_data['esperando_media'] = segundos
+            await update.message.reply_text(f"📤 Envía la foto o video para cada {segundos/60:.0f} min")
+            # Cambiar estado para esperar media
+            context.user_data['esperando'] = 'media_programada'
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+        return
+    
+    if estado == 'media_programada':
+        try:
+            segundos = context.user_data.get('esperando_media', 0)
+            if not segundos:
+                return
+            
+            if 'mensajes_programados' not in grupo_config:
+                grupo_config['mensajes_programados'] = []
+            
+            if update.message.photo:
+                file_id = update.message.photo[-1].file_id
+                grupo_config['mensajes_programados'].append({
+                    "intervalo": segundos,
+                    "mensaje": "¡Hola {NAME}! Recuerda visitar el grupo 🎉",
+                    "media": {"tipo": "foto", "file_id": file_id}
+                })
+                guardar_grupo_config(grupo_id, grupo_config)
+                await update.message.reply_text(f"✅ Foto programada cada {segundos/60:.0f} min")
+                
+                if context.application.job_queue:
+                    context.application.job_queue.run_repeating(
+                        enviar_mensaje_programado,
+                        interval=segundos,
+                        first=5,
+                        name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
+                        chat_id=grupo_id,
+                        user_id=grupo_id
+                    )
+                
+            elif update.message.video:
+                file_id = update.message.video.file_id
+                grupo_config['mensajes_programados'].append({
+                    "intervalo": segundos,
+                    "mensaje": "¡Hola {NAME}! Recuerda visitar el grupo 🎉",
+                    "media": {"tipo": "video", "file_id": file_id}
+                })
+                guardar_grupo_config(grupo_id, grupo_config)
+                await update.message.reply_text(f"✅ Video programado cada {segundos/60:.0f} min")
+                
+                if context.application.job_queue:
+                    context.application.job_queue.run_repeating(
+                        enviar_mensaje_programado,
+                        interval=segundos,
+                        first=5,
+                        name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
+                        chat_id=grupo_id,
+                        user_id=grupo_id
+                    )
+            else:
+                await update.message.reply_text("❌ Envía una foto o video.")
+                return
+            
+            context.user_data.clear()
+            await menu_principal(update, context, grupo_id=grupo_id)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+        return
+    
+    if estado == 'delmsg':
+        try:
+            num = int(update.message.text) - 1
+            mensajes = grupo_config.get('mensajes_programados', [])
+            
+            if 0 <= num < len(mensajes):
+                grupo_config['mensajes_programados'].pop(num)
+                guardar_grupo_config(grupo_id, grupo_config)
+                await update.message.reply_text("✅ Mensaje eliminado")
+            else:
+                await update.message.reply_text("❌ Número inválido")
+            context.user_data.clear()
+            await menu_principal(update, context, grupo_id=grupo_id)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+        return
+    
     # ========== BOTONES ==========
     if estado.startswith('btn_'):
         partes = estado.split('_')
@@ -1300,109 +1858,33 @@ async def handle_config(update, context):
             if lista_key not in grupo_config:
                 grupo_config[lista_key] = []
             
-            texto = update.message.text
+            # Botón SHARE CONTADOR especial
+            if accion == 'share_contador':
+                grupo_config[lista_key].append({
+                    "tipo": "share_contador",
+                    "texto": update.message.text.strip()
+                })
+                guardar_grupo_config(grupo_id, grupo_config)
+                await update.message.reply_text(f"✅ Botón SHARE 0/2 agregado")
+                context.user_data.clear()
+                await menu_principal(update, context, grupo_id=grupo_id)
+                return
             
-            try:
-                if accion == 'url':
-                    partes_txt = texto.split('|')
-                    if len(partes_txt) == 2:
-                        grupo_config[lista_key].append({
-                            "tipo": "url",
-                            "texto": partes_txt[0].strip(),
-                            "url": partes_txt[1].strip()
-                        })
-                        guardar_grupo_config(grupo_id, grupo_config)
-                        await update.message.reply_text(f"✅ Botón URL agregado")
-                    else:
-                        await update.message.reply_text("❌ Formato: `Texto|https://url.com`")
-                
-                elif accion == 'share':
-                    grupo_config[lista_key].append({
-                        "tipo": "share",
-                        "texto": texto.strip()
-                    })
-                    guardar_grupo_config(grupo_id, grupo_config)
-                    await update.message.reply_text(f"✅ Botón Share agregado")
-                
-                elif accion == 'alert':
-                    partes_txt = texto.split('|')
-                    if len(partes_txt) == 2:
-                        grupo_config[lista_key].append({
-                            "tipo": "alert",
-                            "texto": partes_txt[0].strip(),
-                            "alert_text": partes_txt[1].strip()
-                        })
-                        guardar_grupo_config(grupo_id, grupo_config)
-                        await update.message.reply_text(f"✅ Botón Alert agregado")
-                    else:
-                        await update.message.reply_text("❌ Formato: `Texto|Mensaje del popup`")
-                
-                elif accion == 'edit':
-                    partes_txt = texto.split('|')
-                    if len(partes_txt) == 2:
-                        grupo_config[lista_key].append({
-                            "tipo": "edit",
-                            "texto": partes_txt[0].strip(),
-                            "edit_text": partes_txt[1].strip()
-                        })
-                        guardar_grupo_config(grupo_id, grupo_config)
-                        await update.message.reply_text(f"✅ Botón Edit agregado")
-                    else:
-                        await update.message.reply_text("❌ Formato: `Texto|Nuevo contenido`")
-                
-                elif accion == 'delete':
-                    grupo_config[lista_key].append({
-                        "tipo": "delete",
-                        "texto": texto.strip()
-                    })
-                    guardar_grupo_config(grupo_id, grupo_config)
-                    await update.message.reply_text(f"✅ Botón Delete agregado")
-                
-                elif accion == 'custom':
-                    partes_txt = texto.split('|')
-                    if len(partes_txt) == 2:
-                        grupo_config[lista_key].append({
-                            "tipo": "callback",
-                            "texto": partes_txt[0].strip(),
-                            "callback_data": partes_txt[1].strip()
-                        })
-                        guardar_grupo_config(grupo_id, grupo_config)
-                        await update.message.reply_text(f"✅ Botón Custom agregado")
-                    else:
-                        await update.message.reply_text("❌ Formato: `Texto|accion`")
-                
-                elif accion == 'up':
-                    try:
-                        num = int(texto) - 1
-                        if 0 <= num < len(grupo_config[lista_key]) and num > 0:
-                            grupo_config[lista_key][num], grupo_config[lista_key][num-1] = grupo_config[lista_key][num-1], grupo_config[lista_key][num]
-                            guardar_grupo_config(grupo_id, grupo_config)
-                            await update.message.reply_text(f"✅ Botón {num+1} movido hacia arriba")
-                        else:
-                            await update.message.reply_text("❌ Número inválido")
-                    except:
-                        await update.message.reply_text("❌ Envía un número válido")
-                
-                elif accion == 'down':
-                    try:
-                        num = int(texto) - 1
-                        if 0 <= num < len(grupo_config[lista_key]) and num < len(grupo_config[lista_key]) - 1:
-                            grupo_config[lista_key][num], grupo_config[lista_key][num+1] = grupo_config[lista_key][num+1], grupo_config[lista_key][num]
-                            guardar_grupo_config(grupo_id, grupo_config)
-                            await update.message.reply_text(f"✅ Botón {num+1} movido hacia abajo")
-                        else:
-                            await update.message.reply_text("❌ Número inválido")
-                    except:
-                        await update.message.reply_text("❌ Envía un número válido")
-                
-                context.user_data.clear()
-                
-            except Exception as e:
-                await update.message.reply_text(f"❌ Error: {str(e)}")
-                context.user_data.clear()
-        
+            # Procesar botones con el nuevo formato
+            botones_nuevos = procesar_botones(update.message.text, grupo_id)
+            
+            if botones_nuevos:
+                grupo_config[lista_key].extend(botones_nuevos)
+                guardar_grupo_config(grupo_id, grupo_config)
+                await update.message.reply_text(f"✅ {len(botones_nuevos)} botones agregados")
+            else:
+                await update.message.reply_text("❌ Formato incorrecto. Usa: `Título - t.me/enlace`")
+            
+            context.user_data.clear()
+            await menu_principal(update, context, grupo_id=grupo_id)
         return
     
+    # ========== MEDIA ==========
     elif estado == 'media':
         tipo = context.user_data.get('tipo_media', 'bienvenida')
         
@@ -1431,69 +1913,8 @@ async def handle_config(update, context):
             return
         
         context.user_data.clear()
-
-async def handle_media_programada(update, context):
-    if update.effective_user.id != ID_ADMIN:
+        await menu_principal(update, context, grupo_id=grupo_id)
         return
-    
-    segundos = context.user_data.get('esperando_media')
-    if not segundos:
-        return
-    
-    grupo_id = context.user_data.get('grupo_id')
-    if not grupo_id:
-        await update.message.reply_text("❌ Error: no hay grupo configurado.")
-        return
-    
-    grupo_config = get_grupo_config(grupo_id)
-    
-    if 'mensajes_programados' not in grupo_config:
-        grupo_config['mensajes_programados'] = []
-    
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        grupo_config['mensajes_programados'].append({
-            "intervalo": segundos,
-            "mensaje": "¡Hola {nombre}! Recuerda visitar el grupo 🎉",
-            "media": {"tipo": "foto", "file_id": file_id}
-        })
-        guardar_grupo_config(grupo_id, grupo_config)
-        await update.message.reply_text(f"✅ Foto programada cada {segundos/60:.0f} min")
-        
-        if context.application.job_queue:
-            context.application.job_queue.run_repeating(
-                enviar_mensaje_programado,
-                interval=segundos,
-                first=5,
-                name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
-                chat_id=grupo_id,
-                user_id=grupo_id
-            )
-        
-    elif update.message.video:
-        file_id = update.message.video.file_id
-        grupo_config['mensajes_programados'].append({
-            "intervalo": segundos,
-            "mensaje": "¡Hola {nombre}! Recuerda visitar el grupo 🎉",
-            "media": {"tipo": "video", "file_id": file_id}
-        })
-        guardar_grupo_config(grupo_id, grupo_config)
-        await update.message.reply_text(f"✅ Video programado cada {segundos/60:.0f} min")
-        
-        if context.application.job_queue:
-            context.application.job_queue.run_repeating(
-                enviar_mensaje_programado,
-                interval=segundos,
-                first=5,
-                name=f"msg_{grupo_id}_{len(grupo_config['mensajes_programados'])}",
-                chat_id=grupo_id,
-                user_id=grupo_id
-            )
-    else:
-        await update.message.reply_text("❌ Envía una foto o video.")
-        return
-    
-    context.user_data.clear()
 
 # ==================== BORRAR MENSAJES DEL USUARIO ====================
 async def borrar_mensajes_usuario(update, context):
@@ -1525,19 +1946,21 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancelar", cancelar))
     
-    # Mensajes programados
+    # Mensajes programados (comandos en grupo)
     application.add_handler(CommandHandler("addmsg", add_mensaje_grupo))
     application.add_handler(CommandHandler("addmedia", add_mensaje_media_grupo))
     application.add_handler(CommandHandler("removemsg", remove_mensaje_grupo))
     application.add_handler(CommandHandler("listmsg", list_mensajes_grupo))
     
-    # Callbacks
-    application.add_handler(CallbackQueryHandler(share_callback, pattern="share_btn"))
-    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|reingreso_|media_|reset_|auto_|t_|proteger_|borrar_|bt_|elim_|btn_|alert_|edit_|delete_|custom_"))
+    # Callbacks - SHARE
+    application.add_handler(CallbackQueryHandler(share_callback, pattern="share_click"))
+    
+    # Callbacks - MENÚ (todos los demás)
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern="menu_|welcome_|reingreso_|media_|reset_|auto_|t_|proteger_|borrar_|bt_|elim_|btn_|alert_|edit_|delete_|custom_|copy_|addmsg_|addmedia_|delmsg_|listmsg_|fijar_|reglas_"))
     
     # Configuración
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_config))
-    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media_programada))
+    application.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_config))
     
     # Borrar mensajes de usuario en PV
     application.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE, borrar_mensajes_usuario))
